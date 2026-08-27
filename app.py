@@ -442,7 +442,17 @@ def _fan_gate_sidebar() -> dict:
                     format="%.1f",
                     key=f"fg_{field}",
                 )
-            num("balancer_thk_mm", "薄肉部の厚み [mm]", 0.05, 10.0, 0.05)
+            gate_end_thk = v["fan_thk_mm"] if v["gate_type"] == "fan" else v["old_gate_end_thk_mm"]
+            thk_hi = max(round(gate_end_thk - 0.05, 2), 0.05)
+            v["balancer_thk_mm"] = st.number_input(
+                "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
+                min_value=0.05,
+                max_value=thk_hi,
+                value=min(float(_D.balancer_thk_mm), thk_hi),
+                step=0.05,
+                format="%.2f",
+                key="fg_balancer_thk_mm",
+            )
         else:
             for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
                 v[f] = float(getattr(_D, f))

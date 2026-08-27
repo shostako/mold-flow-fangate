@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from core import FanGatePlateConfig
 from tests.ui_helpers import app as _app
 from tests.ui_helpers import texts as _texts
@@ -163,6 +165,14 @@ def test_the_balancer_toggle_thins_the_gate_and_follows_the_gate_width():
     assert not at.exception
     cfg = at.session_state["mfs_settings"]["geometry"]["config"]
     assert cfg["balancer_on"] is True and cfg["balancer_w_mm"] == d.old_gate_w_mm
+    # the thickness bound follows the gate-end thickness: a fan of 0.8
+    # clamps the default 1.0 below it instead of erroring (Codex P1 on PR #9)
+    at.radio(key="fg_gate_label").set_value("ファンゲート").run()
+    at.number_input(key="fg_fan_thk_mm").set_value(0.8).run()
+    assert not at.exception
+    assert "形状パラメータが不正" not in _texts(at)
+    assert at.number_input(key="fg_balancer_thk_mm").value == pytest.approx(0.75)
+    at.number_input(key="fg_fan_thk_mm").set_value(2.0).run()
     # off again: the defaults are recorded, the volume comes back
     at.checkbox(key="fg_balancer_on").set_value(False).run()
     assert "fg_balancer_w_mm" not in {n.key for n in at.number_input}

@@ -33,8 +33,10 @@ Balancer (``balancer_on``, sim's ▽ 肉盗み): an inverted isosceles triangle
 carved into the gate body, centred on the axis. Its base (``balancer_w``
 wide) lies on the gate end line so it touches the tab / product edge; its
 apex points at the sprue, ``balancer_h`` below the gate end. Inside it the
-thickness is ``balancer_thk`` (painted after the gate thickness, before the
-well / slug). Clipped to the gate body, so a base wider than the gate at
+thickness is ``min(gate, balancer_thk)`` (a cut never adds material;
+painted after the gate thickness, before the well / slug), and ``validate``
+requires ``balancer_thk`` below the gate thickness on the gate end line
+(where the base sits), so the ▽ is a real cut at least along its base. Clipped to the gate body, so a base wider than the gate at
 that row simply loses its corners. Not part of the compression zone.
 
 Plate: ``frame_thk`` on the ``frame_w`` border, ``inner_thk`` inside.
@@ -199,6 +201,11 @@ class FanGatePlateConfig:
                 if val <= 0:
                     raise ValueError(f"{name} must be positive when balancer_on (got {val})")
             gate_w = self.fan_w_mm if self.gate_type == "fan" else self.old_gate_w_mm
+            if self.balancer_thk_mm >= self.gate_end_thk_mm - eps:
+                raise ValueError(
+                    f"balancer_thk_mm ({self.balancer_thk_mm}) must be < the gate thickness at "
+                    f"the gate end ({self.gate_end_thk_mm}); a balancer is a cut, it cannot add material"
+                )
             if self.balancer_w_mm > gate_w + eps:
                 raise ValueError(
                     f"balancer_w_mm ({self.balancer_w_mm}) must be ≤ the gate width at the "
@@ -222,6 +229,13 @@ class FanGatePlateConfig:
                 f"cell_size_mm ({self.cell_size_mm}) must be ≤ well_d_mm ({self.well_d_mm}); "
                 f"a mesh coarser than the well cannot resolve the gate block"
             )
+
+    @property
+    def gate_end_thk_mm(self) -> float:
+        """Gate thickness on the gate end line, where the balancer base sits.
+        The balancer must cut below it (upstream the gate may already be
+        thinner; there the cut is a no-op via ``minimum``)."""
+        return self.fan_thk_mm if self.gate_type == "fan" else self.old_gate_end_thk_mm
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
@@ -327,7 +341,8 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
             & (yy <= y_gate_end)
             & (ax <= 0.5 * cfg.balancer_w_mm * t_bal)
         )
-        thk[in_balancer] = cfg.balancer_thk_mm
+        # a cut cannot add material: never raise the gate thickness (Codex P1 on PR #9)
+        thk[in_balancer] = np.minimum(thk[in_balancer], cfg.balancer_thk_mm)
 
     # well pocket and cold slug (deeper than the gate where they overlap)
     thk[in_well] = np.maximum(thk[in_well], cfg.well_depth_mm)

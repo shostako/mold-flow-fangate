@@ -540,6 +540,9 @@ def test_balancer_solves() -> None:
         dict(balancer_on=True, gate_type="old", balancer_w_mm=31.0),  # wider than the old gate
         dict(balancer_on=True, balancer_h_mm=31.0),  # apex inside the well (40 − 10 = 30)
         dict(balancer_on=True, balancer_thk_mm=0.0),
+        dict(balancer_on=True, balancer_thk_mm=2.0),  # = fan thickness: no cut anywhere
+        dict(balancer_on=True, balancer_thk_mm=10.0),  # thicker than the fan (Codex P1 on PR #9)
+        dict(gate_type="old", balancer_on=True, balancer_w_mm=30.0, old_gate_end_thk_mm=0.5),
         dict(balancer_on=True, balancer_w_mm=0.0),
         dict(balancer_on=True, balancer_h_mm=-1.0),
     ],
@@ -549,8 +552,38 @@ def test_validation_rejects_bad_balancer_configs(overrides) -> None:
         build_fan_gate_plate_geometry(_cfg(**overrides))
 
 
+def test_balancer_only_needs_to_cut_at_its_base() -> None:
+    # a taper thinner than the balancer upstream is fine: the base still cuts
+    g = build_fan_gate_plate_geometry(_cfg(balancer_on=True, fan_thk_well_mm=0.8))
+    assert g.mask.any()
+
+
 def test_balancer_limits_are_ignored_while_it_is_off() -> None:
     g = build_fan_gate_plate_geometry(
         _cfg(balancer_on=False, balancer_w_mm=999.0, balancer_h_mm=999.0)
     )
     assert g.mask.any()
+
+
+def test_balancer_never_adds_material_where_the_gate_is_already_thinner() -> None:
+    """Codex P1 on PR #9: the balancer is a cut. Where the tapered fan is
+    already below ``balancer_thk`` the gate thickness must stay, not grow."""
+    cfg = _cfg(
+        balancer_on=True,
+        balancer_thk_mm=1.5,
+        balancer_h_mm=30.0,
+        fan_thk_well_mm=1.0,
+        fan_thk_mm=2.0,
+    )
+    assert cfg.gate_end_thk_mm == 2.0
+    g = build_fan_gate_plate_geometry(cfg)
+    g0 = build_fan_gate_plate_geometry(_cfg(fan_thk_well_mm=1.0, fan_thk_mm=2.0))
+    inside = _balancer_cells(cfg, g)
+    assert inside.any()
+    assert np.all(g.thickness_mm[inside] <= g0.thickness_mm[inside] + 1e-12)
+    assert np.all(g.thickness_mm[inside] <= cfg.balancer_thk_mm + 1e-12)
+    # near the base (fan at 2.0) it cuts to 1.5; near the apex the taper is
+    # below 1.5 already and is left alone
+    assert (g.thickness_mm[inside] == cfg.balancer_thk_mm).any()
+    assert (g.thickness_mm[inside] < cfg.balancer_thk_mm).any()
+    assert g.volume_cm3() < g0.volume_cm3()
