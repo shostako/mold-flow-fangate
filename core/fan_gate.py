@@ -172,6 +172,11 @@ class FanGatePlateConfig:
                 raise ValueError(
                     f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
                 )
+            if self.cell_size_mm > self.old_gate_w_mm + eps:
+                raise ValueError(
+                    f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
+                    f"a mesh coarser than the gate body leaves the well disconnected"
+                )
         if self.slug_d_mm > self.well_d_mm + eps:
             raise ValueError(f"slug_d_mm ({self.slug_d_mm}) must be ≤ well_d_mm ({self.well_d_mm})")
         if self.sprue_bottom_d_mm > self.well_d_mm + eps:
