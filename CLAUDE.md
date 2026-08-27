@@ -9,16 +9,15 @@
   `build_demo_geometry` のみ
 - ファンゲート builder は `core/fan_gate.py`（`FanGatePlateConfig` / `build_fan_gate_plate_geometry`、v0.2.0）。
   既定値が spec の実機。圧縮マスク＝製品＋ランド帯、`Geometry.product_mask`（製品のみ）が表示原点を決める
-- 次の候補: sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）を新 builder で書き直す、
-  ファンの多段テーパー（profile_gate 流用）、Streamlit UI（`app.py`）
+- sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
+- 次の候補: ファンの多段テーパー（profile_gate 流用）、Streamlit UI（`app.py`）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 
 ## sim から持ち込まなかったもの
 LGP 専用の builder（FilmGate/FilmGate2/DirectGate）、`profile_gate.py`, `spec_source.py`, `app.py`, `run_demo.py`,
-`data/gate_profiles/`。テストでは `FilmGateConfig` 依存のもの（`test_two_phase`, `test_compression_stroke`,
-`test_settings_record`, `test_geometry_*`, `test_*_ui`）を見送り、`test_multilayer_solver` / `test_visualizer_layer` は
-フィクスチャを `build_demo_geometry` に置換、`test_visualizer_3d` は DirectGate の段付きプレート1本を削った。
-これらは新 builder ができたら書き直す。
+`data/gate_profiles/`。テストでは sim 固有の `test_geometry_*` と `test_*_ui` を持ち込まず、`test_multilayer_solver` /
+`test_visualizer_layer` はフィクスチャを `build_demo_geometry` に置換、`test_visualizer_3d` は DirectGate の段付きプレート1本を
+削った。`test_two_phase` / `test_compression_stroke` / `test_settings_record` は `FanGatePlateConfig` で書き直した。
 
 ## builder の設計メモ
 - 座標は sim と同じ格子系（ゲートブロックが下、製品が上、y は上向き）。表示は `display_origin_mm()` で製品エッジ y=0 に変換
