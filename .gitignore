@@ -1,5 +1,25 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Virtual environment
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Generated outputs
+outputs/
+
+# External tool markers
+.codex
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
