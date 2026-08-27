@@ -3,6 +3,25 @@
 [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) 準拠、[セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 
+## [0.3.0] — 2026-08-27
+
+**Streamlit UI。** sim の `app.py` からソルバ設定・メインパネル（プレビュー／解析実行／充填プレーヤー／圧力／
+ウェルド／壁面冷却／層別／二相ショートショット／3D／ZIP）をそのまま持ち込み、形状入力だけ
+`FanGatePlateConfig` のサイドバー（製品／ランド帯／ファンゲート／井戸・スラッグ・スプルー／メッシュ）に置き換えた。
+
+### 追加
+
+- `app.py`: `streamlit run app.py`。既定値は spec の実機、1 mm セルで解析一周 約 60 秒
+- プレビューにキャビティ体積と製品体積（`product_mask`）を併記
+- 数式説明の圧縮成形の項を「製品＋ランド帯が膨張、ゲートブロックは不変」に更新
+- UI テスト: `test_fan_gate_ui`（既定値の記録、製品体積表示、テーパー切替、形状エラー）、sim から `test_two_phase_ui` /
+  `test_weld_ui` を移植。`tests/ui_helpers.py` の `app(fast=True)` で 4 mm セル・12 フレームに落として高速化
+- 入力が前回の解析から変わると結果ペイン先頭に警告（結果は比較用に残す）。解析実行ごとに前回の出力ディレクトリを削除
+
+### 変更
+
+- Streamlit の下限を 1.36 に（`st.columns(vertical_alignment=)`）
+
 ## [0.2.1] — 2026-08-27
 
 ### テスト
