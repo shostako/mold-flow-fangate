@@ -25,6 +25,22 @@ def _grid_mm(g):
 # ---------------------------------------------------------------- basics
 
 
+@pytest.mark.parametrize("cell", [1.0, 2.0, 5.0, 18.0])
+def test_every_resolution_yields_an_injection_gate_near_the_axis(cell) -> None:
+    """A mesh coarser than the sprue foot must still get a gate (Codex P2 on
+    PR #3): the fallback snaps to the cavity cell nearest the axis."""
+    cfg = _cfg(cell_size_mm=cell)
+    g = build_fan_gate_plate_geometry(cfg)
+    assert g.gates
+    yy, xx = _grid_mm(g)
+    for iy, ix in g.gates:
+        assert g.mask[iy, ix]
+        assert np.hypot(xx[iy, ix] - cfg.axis_x_mm, yy[iy, ix] - cfg.y_axis_mm) <= cell * 1.5
+    HeleShawSolver(geometry=g, material=MaterialDB()["PP"], injection_volume_flow_cm3s=50.0).solve(
+        num_frames=2
+    )
+
+
 def test_builds_with_spec_defaults() -> None:
     g = build_fan_gate_plate_geometry(_cfg())
     assert g.label == "fan_gate_plate"

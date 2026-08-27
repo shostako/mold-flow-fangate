@@ -249,10 +249,13 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     in_sprue = r2_axis <= (cfg.sprue_bottom_d_mm / 2.0) ** 2
     gate_iys, gate_ixs = np.where(in_sprue & mask)
     if gate_iys.size == 0:
-        ic_y = int(np.argmin(np.abs(yy[:, 0] - y_axis)))
-        ic_x = int(np.argmin(np.abs(xx[0, :] - cx)))
-        if mask[ic_y, ic_x]:
-            geom.gates.append((ic_y, ic_x))
+        # Mesh coarser than the sprue foot: no cell centre lands inside the
+        # disc. Snap to the cavity cell nearest the axis so every built
+        # geometry has an injection boundary (a coarse mesh must not
+        # silently produce a gate-less cavity).
+        d2 = np.where(mask, r2_axis, np.inf)
+        ic_y, ic_x = np.unravel_index(int(np.argmin(d2)), d2.shape)
+        geom.gates.append((int(ic_y), int(ic_x)))
     else:
         for iy, ix in zip(gate_iys, gate_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
