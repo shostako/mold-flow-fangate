@@ -3,6 +3,29 @@
 [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) 準拠、[セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 
+## [0.4.0] — 2026-08-27
+
+**ゲート形状（ファン／旧ゲート）× タブ有無 の 4 通り。** 実機ヒアリングの再訂正: スプルー軸→ゲート端は 40（圧縮部の境界）、
+タブ 10 を足して製品エッジまで 50。以前の「ランド端起点 50／製品エッジから 60」は聞き違い。
+
+### 追加
+
+- `FanGatePlateConfig.gate_type`（`"fan"` / `"old"`）と `tab_on`。旧ゲートは幅 30 の矩形＋井戸全円、井戸側 t=4.0、
+  ゲート端手前 15 mm で 4.0→2.0 の傾斜（`old_gate_*_mm`）。タブなしは製品エッジがゲート端に来る（ゲート形状は不変）。
+  `label` は `fan_gate_plate` / `old_gate_plate`
+- `app.py`: ゲート形状のラジオ、タブありチェック。選ばれていない側のウィジェットは出さず既定値を記録に残す
+- `docs/gate_variants_thickness.png`（4 通りの厚みマップ）。`docs/fan_gate_thickness.png` は削除
+- テスト: 4 通りの圧縮マスク＝ゲート端より上、製品体積不変、タブなしの直付け、旧ゲートの輪郭と傾斜、旧ゲートのバリデーション、
+  UI のラジオ／チェックの疎通
+- バリデーションは選んだゲート形状の分だけ効く（Codex P1: 旧ゲートで製品幅 < 250 が隠れた `fan_w_mm` に弾かれていた）。
+  旧ゲートは `gate_len_mm ≥ old_gate_ramp_len_mm + well_d_mm / 2`（Codex P2: 傾斜が井戸円に食い込む／円がゲート端を越える）、
+  `cell_size_mm ≤ old_gate_w_mm`（Codex P2: メッシュより細い矩形が消えて井戸が孤立）
+
+### 変更（後方非互換）
+
+- 命名を実機に合わせて `land_*` → `tab_*`、`fan_len_mm` → `gate_len_mm`（既定 50 → 40）、`y_fan_end_mm` → `y_gate_end_mm`。
+  `tab_len_eff_mm` を追加
+
 ## [0.3.1] — 2026-08-27
 
 ### 修正

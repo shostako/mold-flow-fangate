@@ -63,7 +63,7 @@ st.set_page_config(page_title="額縁プレート ファンゲート 流動解�
 st.title("額縁プレート ファンゲート 流動解析")
 st.caption(
     "額縁肉厚プレート（外周薄肉／内側厚肉）をファンゲート＋スプルー直結で射出（圧縮）成形するときの"
-    "樹脂流動を簡易解析するツール。ランド帯・ファン形状・圧縮条件の方向性検討を、実機評価前の"
+    "樹脂流動を簡易解析するツール。タブ・ゲート形状（ファン／旧ゲート）・圧縮条件の方向性検討を、実機評価前の"
     "初期検討段階で迅速に行うことを目的とする。商用 CAE（Moldflow 等）の代替を意図したものではない。"
 )
 
@@ -216,7 +216,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "圧縮位相を時間ステッピングで解かず、**圧縮部の厚みを膨張**させた等価モデルとして扱う。"
         "流路抵抗 $S \\propto h^3$ が一気に下がる効果を擬似再現。"
-        "膨張対象は「製品＋ランド帯」のセル（この金型ではランドも圧縮ブロックと一緒に動く）。"
+        "膨張対象は「製品＋タブ」のセル（この金型ではタブ＝全幅ランドも圧縮ブロックと一緒に動く）。"
         "ファン・井戸・コールドスラッグ・スプルーはゲートブロック側で射出時の肉厚のまま不変。"
         "UI は **stroke モード**（金型シム量の物理に整合）で統一。"
         "倍率指定の **factor モード**は CLI / solver 引数で後方互換のためだけに残す。"
@@ -248,7 +248,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "- 薄板キャビティ内の 2D 流動（局所剪断と局所抵抗の効果）\n"
         "- 樹脂物性（密度・比熱・熱拡散率 → 熱伝導率派生・Cross-WLF 粘度パラメータ）\n"
-        "- 額縁プレートの 2 段肉厚、全幅ランド帯（平面→傾斜）、ファン形状（均一／テーパー）、井戸・コールドスラッグの深さ\n"
+        "- 額縁プレートの 2 段肉厚、全幅タブ（平面→傾斜、有無を選択）、ゲート形状（ファン 均一／テーパー、旧タブゲート）、井戸・コールドスラッグの深さ\n"
         "- 流動先端の到達順、ウェルドライン、エアトラップ\n"
         "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
         "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
@@ -283,7 +283,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "（Moldflow / Moldex3D 等）の置き換えではない。\n\n"
         "- ◯ 向く：ゲート位置候補の比較、ランナー形状の方向性決定、"
         "**極薄プレート（$t < 0.5$ mm）の壁面冷却・剪断発熱の効きの可視化**、"
-        "ランド帯・ファン肉厚の変更が充填順序に与える効果、圧縮ストロークと計量体積の当たり\n"
+        "タブの有無・ゲート形状の変更が充填順序に与える効果、圧縮ストロークと計量体積の当たり\n"
         "- × 向かない：寸法精度予測、保圧設計、収縮反り、面内コーナー流動詳細、最終肉厚分布の精密計算"
     )
 
@@ -310,6 +310,7 @@ material_keys = list(db.keys())
 
 # ----------------------- fan-gate plate: parametric inputs -----------------------
 _D = FanGatePlateConfig()  # spec defaults (docs/spec.md)
+_GATE_LABELS = {"ファンゲート": "fan", "旧ゲート（タブゲート）": "old"}
 
 
 def _fan_gate_sidebar() -> dict:
@@ -337,28 +338,74 @@ def _fan_gate_sidebar() -> dict:
         num("frame_w_mm", "額縁幅 [mm]", 0.0, 100.0, 0.5, fmt="%.1f")
         num("frame_thk_mm", "額縁肉厚 [mm]", 0.1, 10.0, 0.05)
         num("inner_thk_mm", "内側肉厚 [mm]", 0.1, 10.0, 0.05)
-    with st.expander("ランド帯（製品エッジ外側、全幅）", expanded=False):
-        num("land_len_mm", "ランド長 [mm]", 0.5, 50.0, 0.5, fmt="%.1f")
-        num("land_flat_len_mm", "うち平面部の長さ（製品エッジ側）[mm]", 0.0, 50.0, 0.5, fmt="%.1f")
-        num("land_flat_thk_mm", "平面部の厚み [mm]", 0.05, 5.0, 0.05)
-        num("land_end_thk_mm", "傾斜終端（ファン側）の厚み [mm]", 0.05, 10.0, 0.05)
-    with st.expander("ファンゲート", expanded=False):
-        num("fan_w_mm", "ファン接続幅（ランド側長辺）[mm]", 5.0, 600.0, 1.0, fmt="%.1f")
-        num("fan_len_mm", "ファン長（スプルー軸 → ランド 傾斜端）[mm]", 1.0, 300.0, 1.0, fmt="%.1f")
-        num("fan_thk_mm", "ファン肉厚（ランド側）[mm]", 0.1, 10.0, 0.05)
-        taper = st.checkbox("井戸側→ランド側の直線テーパー", value=False, key="fg_taper_on")
-        if taper:
-            v["fan_thk_well_mm"] = st.number_input(
-                "ファン肉厚（井戸側）[mm]",
-                min_value=0.1,
-                max_value=10.0,
-                value=float(_D.fan_thk_mm),
-                step=0.05,
-                format="%.2f",
-                key="fg_fan_thk_well_mm",
+    gate_label = st.radio(
+        "ゲート形状",
+        list(_GATE_LABELS),
+        index=list(_GATE_LABELS.values()).index(_D.gate_type),
+        horizontal=True,
+        key="fg_gate_label",
+    )
+    v["gate_type"] = _GATE_LABELS[gate_label]
+    v["tab_on"] = st.checkbox(
+        "タブ（ゲート端 → 製品エッジの全幅ランド、圧縮対象）あり", value=_D.tab_on, key="fg_tab_on"
+    )
+    num(
+        "gate_len_mm",
+        "ゲート長（スプルー軸 → ゲート端＝圧縮部境界）[mm]",
+        1.0,
+        300.0,
+        1.0,
+        fmt="%.1f",
+    )
+    if v["tab_on"]:
+        with st.expander("タブ（全幅ランド）", expanded=False):
+            num("tab_len_mm", "タブ長 [mm]", 0.5, 50.0, 0.5, fmt="%.1f")
+            num(
+                "tab_flat_len_mm",
+                "うち平面部の長さ（製品エッジ側）[mm]",
+                0.0,
+                50.0,
+                0.5,
+                fmt="%.1f",
             )
-        else:
-            v["fan_thk_well_mm"] = None
+            num("tab_flat_thk_mm", "平面部の厚み [mm]", 0.05, 5.0, 0.05)
+            num("tab_end_thk_mm", "傾斜終端（ゲート側）の厚み [mm]", 0.05, 10.0, 0.05)
+    else:
+        for f in ("tab_len_mm", "tab_flat_len_mm", "tab_flat_thk_mm", "tab_end_thk_mm"):
+            v[f] = float(getattr(_D, f))
+    if v["gate_type"] == "fan":
+        with st.expander("ファンゲート", expanded=False):
+            num("fan_w_mm", "ファン接続幅（ゲート端の長辺）[mm]", 5.0, 600.0, 1.0, fmt="%.1f")
+            num("fan_thk_mm", "ファン肉厚（ゲート端側）[mm]", 0.1, 10.0, 0.05)
+            taper = st.checkbox("井戸側→ゲート端の直線テーパー", value=False, key="fg_taper_on")
+            if taper:
+                v["fan_thk_well_mm"] = st.number_input(
+                    "ファン肉厚（井戸側）[mm]",
+                    min_value=0.1,
+                    max_value=10.0,
+                    value=float(_D.fan_thk_mm),
+                    step=0.05,
+                    format="%.2f",
+                    key="fg_fan_thk_well_mm",
+                )
+            else:
+                v["fan_thk_well_mm"] = None
+        for f in (
+            "old_gate_w_mm",
+            "old_gate_thk_mm",
+            "old_gate_ramp_len_mm",
+            "old_gate_end_thk_mm",
+        ):
+            v[f] = float(getattr(_D, f))
+    else:
+        with st.expander("旧ゲート（タブゲート）", expanded=False):
+            num("old_gate_w_mm", "ゲート幅 [mm]", 1.0, 600.0, 1.0, fmt="%.1f")
+            num("old_gate_thk_mm", "ゲート肉厚（井戸側、井戸円ごと）[mm]", 0.1, 10.0, 0.05)
+            num("old_gate_ramp_len_mm", "ゲート端手前の傾斜長 [mm]", 0.0, 300.0, 1.0, fmt="%.1f")
+            num("old_gate_end_thk_mm", "ゲート端の厚み（タブ接続）[mm]", 0.1, 10.0, 0.05)
+        v["fan_w_mm"] = float(_D.fan_w_mm)
+        v["fan_thk_mm"] = float(_D.fan_thk_mm)
+        v["fan_thk_well_mm"] = None
     with st.expander("井戸・コールドスラッグ・スプルー", expanded=False):
         num("well_d_mm", "井戸径 φ [mm]", 1.0, 100.0, 0.5, fmt="%.1f")
         num("well_depth_mm", "井戸深さ [mm]", 0.1, 20.0, 0.1, fmt="%.1f")
@@ -772,7 +819,7 @@ with col_left:
     st.image(fig_buf.getvalue())
     st.caption(
         "y = 0 は製品エッジ（ゲート側長辺）、x = 0 はスプルー軸（赤丸＝射出点）。"
-        "ランド帯・ファン・井戸・スプルーは y < 0 側。"
+        "タブ・ゲート・井戸・スプルーは y < 0 側。"
     )
 
 

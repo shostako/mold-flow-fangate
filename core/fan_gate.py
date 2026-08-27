@@ -1,39 +1,46 @@
-"""Frame-thickness plate fed by a fan gate + sprue (``docs/spec.md``).
+"""Frame-thickness plate fed by a fan gate or the old tab gate + sprue
+(``docs/spec.md``).
 
 Top-down layout, grid frame (mm, y up, x right; the gate block sits below
 the product like sim's film gate)::
 
     y_plate_top   = y_edge + plate_h
-    y_edge        = y_fan_end + land_len         product long edge (display y = 0)
-    y_flat_start  = y_edge - land_flat_len       land: flat 1.0 next to the edge
-    y_fan_end     = y_axis + fan_len             land: ramp end (2.0), fan long edge
-    y_axis        = pad + well_d / 2             sprue axis = well center = trapezoid
-                                                 short edge (width = well_d)
-    y = pad                                      half-circle bottom
+    y_edge        = y_gate_end + tab_len (0 if no tab)   product long edge (display y = 0)
+    y_flat_start  = y_edge - tab_flat_len               tab: flat 1.0 next to the edge
+    y_gate_end    = y_axis + gate_len                   gate end = compression-zone boundary
+    y_axis        = pad + well_d / 2                    sprue axis = well center
+    y = pad                                             half-circle bottom
 
-Silhouette = half-circle (well) ∪ trapezoid (fan) ∪ land band ∪ plate.
-The land band spans the **full product width** (not the fan width); the
-fan's long edge (``fan_w``) joins the land's 2.0 mm end.
+Two gate shapes (``gate_type``), same axis position and ``gate_len``:
 
-Thickness (mm, continuous in y except at the frame/inner step):
+- ``"fan"``: half-circle (well) ∪ trapezoid whose short edge is ``well_d``
+  on the axis line and whose long edge is ``fan_w`` at ``y_gate_end``.
+  ``fan_thk`` uniform, or a linear taper ``fan_thk_well → fan_thk`` from the
+  axis line to the long edge when ``fan_thk_well`` is set.
+- ``"old"`` (the original tab gate): full well disc ∪ rectangle ``old_gate_w``
+  wide from the axis line to ``y_gate_end``. ``old_gate_thk`` (4.0) from the
+  well up to ``old_gate_ramp_len`` before the gate end, then a linear ramp
+  down to ``old_gate_end_thk`` (2.0) at the gate end.
 
-- plate: ``frame_thk`` on the ``frame_w`` border, ``inner_thk`` inside
-- land: ``land_flat_thk`` on ``[y_flat_start, y_edge]``; linear
-  ``land_end_thk → land_flat_thk`` on ``[y_fan_end, y_flat_start]``
-- fan (half-circle + trapezoid): ``fan_thk`` uniform, or a linear taper
-  ``fan_thk_well → fan_thk`` from the axis line to the long edge when
-  ``fan_thk_well`` is set
-- well: disc ``well_d`` at the axis, thickness ``max(well_depth, fan)``
-- cold slug: disc ``slug_d`` under the axis, ``well_depth + slug_depth``
-- sprue: the Hele-Shaw model has no vertical channel; the sprue foot
-  (``sprue_bottom_d`` disc) is the Dirichlet τ=0 injection point.
-  ``sprue_len`` / ``sprue_top_d`` are carried for a future nozzle
-  pressure-loss term only.
+Tab (``tab_on``): the ``tab_len`` band between the gate end and the product
+edge, spanning the **full product width** (the mold calls it the tab gate
+land). ``tab_flat_thk`` on ``[y_flat_start, y_edge]``, linear
+``tab_end_thk → tab_flat_thk`` on ``[y_gate_end, y_flat_start]``. Without
+the tab the product edge sits directly on the gate end (the gate keeps its
+shape; the product moves toward the sprue).
 
-Compression (ICM): **product + land band** inflate together
-(``compression_mask``); the fan / well / slug are the fixed gate block.
-``product_mask`` is the plate alone so the display origin stays on the
-product edge.
+Plate: ``frame_thk`` on the ``frame_w`` border, ``inner_thk`` inside.
+Well: disc ``well_d`` at the axis, thickness ``max(well_depth, gate)``.
+Cold slug: disc ``slug_d`` under the axis, ``well_depth + slug_depth``.
+Sprue: the Hele-Shaw model has no vertical channel; the sprue foot
+(``sprue_bottom_d`` disc) is the Dirichlet τ=0 injection point.
+``sprue_len`` / ``sprue_top_d`` are carried for a future nozzle
+pressure-loss term only.
+
+Compression (ICM): **product + tab** inflate together (``compression_mask``);
+everything below the gate end (fan / old gate / well / slug) is the fixed
+gate block. ``product_mask`` is the plate alone so the display origin stays
+on the product edge.
 """
 
 from __future__ import annotations
@@ -43,6 +50,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from .geometry import Geometry
+
+GATE_TYPES = ("fan", "old")
 
 
 @dataclass(frozen=True)
@@ -56,16 +65,26 @@ class FanGatePlateConfig:
     frame_w_mm: float = 15.0
     frame_thk_mm: float = 1.0
     inner_thk_mm: float = 4.0
-    # land band (product edge → fan), full product width
-    land_len_mm: float = 10.0
-    land_flat_len_mm: float = 2.0
-    land_flat_thk_mm: float = 1.0
-    land_end_thk_mm: float = 2.0
-    # fan gate: trapezoid long edge (land side) → short edge = well_d (axis line)
+    # gate: "fan" (fan gate) or "old" (the original tab gate). Both end at
+    # gate_len from the sprue axis; that end is the compression-zone boundary
+    gate_type: str = "fan"
+    gate_len_mm: float = 40.0  # axis line → gate end
+    # tab (gate end → product edge), full product width; the compressed land
+    tab_on: bool = True
+    tab_len_mm: float = 10.0
+    tab_flat_len_mm: float = 2.0
+    tab_flat_thk_mm: float = 1.0
+    tab_end_thk_mm: float = 2.0
+    # fan gate: trapezoid long edge (tab side) → short edge = well_d (axis line)
     fan_w_mm: float = 250.0
-    fan_len_mm: float = 50.0  # axis line → land 2.0 end
-    fan_thk_mm: float = 2.0  # at the land end (uniform when fan_thk_well_mm is None)
+    fan_thk_mm: float = 2.0  # at the gate end (uniform when fan_thk_well_mm is None)
     fan_thk_well_mm: float | None = None  # at the axis line; enables a linear taper
+    # old tab gate: rectangle old_gate_w wide, old_gate_thk from the well up to
+    # old_gate_ramp_len before the gate end, then a ramp down to old_gate_end_thk
+    old_gate_w_mm: float = 30.0
+    old_gate_thk_mm: float = 4.0
+    old_gate_ramp_len_mm: float = 15.0
+    old_gate_end_thk_mm: float = 2.0
     # well (pocket at the sprue foot) and cold slug
     well_d_mm: float = 20.0
     well_depth_mm: float = 3.0
@@ -86,12 +105,15 @@ class FanGatePlateConfig:
             ("plate_h_mm", self.plate_h_mm),
             ("frame_thk_mm", self.frame_thk_mm),
             ("inner_thk_mm", self.inner_thk_mm),
-            ("land_len_mm", self.land_len_mm),
-            ("land_flat_thk_mm", self.land_flat_thk_mm),
-            ("land_end_thk_mm", self.land_end_thk_mm),
+            ("gate_len_mm", self.gate_len_mm),
+            ("tab_len_mm", self.tab_len_mm),
+            ("tab_flat_thk_mm", self.tab_flat_thk_mm),
+            ("tab_end_thk_mm", self.tab_end_thk_mm),
             ("fan_w_mm", self.fan_w_mm),
-            ("fan_len_mm", self.fan_len_mm),
             ("fan_thk_mm", self.fan_thk_mm),
+            ("old_gate_w_mm", self.old_gate_w_mm),
+            ("old_gate_thk_mm", self.old_gate_thk_mm),
+            ("old_gate_end_thk_mm", self.old_gate_end_thk_mm),
             ("well_d_mm", self.well_d_mm),
             ("well_depth_mm", self.well_depth_mm),
             ("slug_d_mm", self.slug_d_mm),
@@ -105,12 +127,15 @@ class FanGatePlateConfig:
                 raise ValueError(f"{name} must be positive (got {val})")
         for name, val in (
             ("frame_w_mm", self.frame_w_mm),
-            ("land_flat_len_mm", self.land_flat_len_mm),
+            ("tab_flat_len_mm", self.tab_flat_len_mm),
+            ("old_gate_ramp_len_mm", self.old_gate_ramp_len_mm),
             ("slug_depth_mm", self.slug_depth_mm),
             ("pad_mm", self.pad_mm),
         ):
             if val < 0:
                 raise ValueError(f"{name} must be ≥ 0 (got {val})")
+        if self.gate_type not in GATE_TYPES:
+            raise ValueError(f"gate_type must be one of {GATE_TYPES} (got {self.gate_type!r})")
         if self.fan_thk_well_mm is not None and self.fan_thk_well_mm <= 0:
             raise ValueError(
                 f"fan_thk_well_mm must be positive when set (got {self.fan_thk_well_mm})"
@@ -119,17 +144,39 @@ class FanGatePlateConfig:
             raise ValueError(
                 f"frame_w_mm ({self.frame_w_mm}) must be < half of the smaller plate side"
             )
-        if self.land_flat_len_mm > self.land_len_mm + eps:
+        if self.tab_flat_len_mm > self.tab_len_mm + eps:
             raise ValueError(
-                f"land_flat_len_mm ({self.land_flat_len_mm}) must be ≤ land_len_mm ({self.land_len_mm})"
+                f"tab_flat_len_mm ({self.tab_flat_len_mm}) must be ≤ tab_len_mm ({self.tab_len_mm})"
             )
-        if self.fan_w_mm > self.plate_w_mm + eps:
-            raise ValueError(f"fan_w_mm ({self.fan_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})")
-        if self.fan_w_mm < self.well_d_mm - eps:
-            raise ValueError(
-                f"fan_w_mm ({self.fan_w_mm}) must be ≥ well_d_mm ({self.well_d_mm}); "
-                f"inverted trapezoid is not supported"
-            )
+        if self.gate_type == "fan":
+            if self.fan_w_mm > self.plate_w_mm + eps:
+                raise ValueError(
+                    f"fan_w_mm ({self.fan_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
+                )
+            if self.fan_w_mm < self.well_d_mm - eps:
+                raise ValueError(
+                    f"fan_w_mm ({self.fan_w_mm}) must be ≥ well_d_mm ({self.well_d_mm}); "
+                    f"inverted trapezoid is not supported"
+                )
+        else:
+            # the full well disc sits inside the constant-thickness part of the
+            # gate: the ramp starts at or above the disc top, and the disc top is
+            # at or below the gate end (else it would leak into the tab/product)
+            if self.old_gate_ramp_len_mm + self.well_d_mm / 2.0 > self.gate_len_mm + eps:
+                raise ValueError(
+                    f"old gate: gate_len_mm ({self.gate_len_mm}) must be ≥ "
+                    f"old_gate_ramp_len_mm ({self.old_gate_ramp_len_mm}) + well_d_mm / 2 "
+                    f"({self.well_d_mm / 2.0}) so the well stays in the constant-thickness part"
+                )
+            if self.old_gate_w_mm > self.plate_w_mm + eps:
+                raise ValueError(
+                    f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
+                )
+            if self.cell_size_mm > self.old_gate_w_mm + eps:
+                raise ValueError(
+                    f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
+                    f"a mesh coarser than the gate body leaves the well disconnected"
+                )
         if self.slug_d_mm > self.well_d_mm + eps:
             raise ValueError(f"slug_d_mm ({self.slug_d_mm}) must be ≤ well_d_mm ({self.well_d_mm})")
         if self.sprue_bottom_d_mm > self.well_d_mm + eps:
@@ -148,13 +195,18 @@ class FanGatePlateConfig:
         return self.pad_mm + self.well_d_mm / 2.0
 
     @property
-    def y_fan_end_mm(self) -> float:
-        return self.y_axis_mm + self.fan_len_mm
+    def y_gate_end_mm(self) -> float:
+        """Gate end = compression-zone boundary (tab start, or the product edge)."""
+        return self.y_axis_mm + self.gate_len_mm
+
+    @property
+    def tab_len_eff_mm(self) -> float:
+        return self.tab_len_mm if self.tab_on else 0.0
 
     @property
     def y_edge_mm(self) -> float:
         """Product long edge (display ``y = 0``)."""
-        return self.y_fan_end_mm + self.land_len_mm
+        return self.y_gate_end_mm + self.tab_len_eff_mm
 
     @property
     def y_plate_top_mm(self) -> float:
@@ -173,14 +225,14 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     dx = cfg.cell_size_mm
     cx = cfg.axis_x_mm
     y_axis = cfg.y_axis_mm
-    y_fan_end = cfg.y_fan_end_mm
+    y_gate_end = cfg.y_gate_end_mm
     y_edge = cfg.y_edge_mm
     y_top = cfg.y_plate_top_mm
-    y_flat_start = y_edge - cfg.land_flat_len_mm
+    y_flat_start = y_edge - cfg.tab_flat_len_mm
     r_well = cfg.well_d_mm / 2.0
 
     total_w = 2 * pad + cfg.plate_w_mm
-    total_h = pad + r_well + cfg.fan_len_mm + cfg.land_len_mm + cfg.plate_h_mm + pad
+    total_h = pad + r_well + cfg.gate_len_mm + cfg.tab_len_eff_mm + cfg.plate_h_mm + pad
     nx = int(round(total_w / dx))
     ny = int(round(total_h / dx))
 
@@ -191,14 +243,21 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     r2_axis = (xx - cx) ** 2 + (yy - y_axis) ** 2
 
     # --- silhouette ---
-    in_half_circle = (r2_axis <= r_well**2) & (yy <= y_axis)
-    t_fan = np.clip((yy - y_axis) / max(cfg.fan_len_mm, 1e-12), 0.0, 1.0)
-    half_w_at_y = 0.5 * (cfg.well_d_mm + (cfg.fan_w_mm - cfg.well_d_mm) * t_fan)
-    in_trapezoid = (yy >= y_axis) & (yy <= y_fan_end) & (ax <= half_w_at_y)
+    in_well = r2_axis <= r_well**2
+    t_gate = np.clip((yy - y_axis) / max(cfg.gate_len_mm, 1e-12), 0.0, 1.0)
+    if cfg.gate_type == "fan":
+        half_w_at_y = 0.5 * (cfg.well_d_mm + (cfg.fan_w_mm - cfg.well_d_mm) * t_gate)
+        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_w_at_y)
+        in_gate = in_gate_body | (in_well & (yy <= y_axis))
+    else:
+        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= cfg.old_gate_w_mm / 2.0)
+        in_gate = in_gate_body | in_well
     in_x_plate = (xx >= pad) & (xx <= pad + cfg.plate_w_mm)
-    in_land = (yy > y_fan_end) & (yy <= y_edge) & in_x_plate
+    in_tab = (
+        (yy > y_gate_end) & (yy <= y_edge) & in_x_plate if cfg.tab_on else np.zeros_like(in_gate)
+    )
     in_plate = (yy > y_edge) & (yy <= y_top) & in_x_plate
-    mask = in_half_circle | in_trapezoid | in_land | in_plate
+    mask = in_gate | in_tab | in_plate
     if not mask.any():
         raise ValueError(
             f"cell_size_mm ({dx}) rasterises the whole cavity away ({ny}x{nx} grid, no cavity cell)"
@@ -207,29 +266,37 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     # --- thickness ---
     thk = np.zeros_like(xx, dtype=float)
 
-    # fan block (half-circle + trapezoid): uniform or linear taper axis → land end
-    if cfg.fan_thk_well_mm is None:
-        fan_thk = np.full_like(xx, cfg.fan_thk_mm, dtype=float)
+    if cfg.gate_type == "fan":
+        # uniform, or linear taper axis line → gate end
+        if cfg.fan_thk_well_mm is None:
+            gate_thk = np.full_like(xx, cfg.fan_thk_mm, dtype=float)
+        else:
+            gate_thk = cfg.fan_thk_well_mm + (cfg.fan_thk_mm - cfg.fan_thk_well_mm) * t_gate
     else:
-        fan_thk = cfg.fan_thk_well_mm + (cfg.fan_thk_mm - cfg.fan_thk_well_mm) * t_fan
-    in_fan = in_half_circle | in_trapezoid
-    thk[in_fan] = fan_thk[in_fan]
+        # old_gate_thk up to the ramp start, then linear down to old_gate_end_thk
+        y_ramp_start = y_gate_end - cfg.old_gate_ramp_len_mm
+        if cfg.old_gate_ramp_len_mm > 1e-12:
+            t_ramp = np.clip((yy - y_ramp_start) / cfg.old_gate_ramp_len_mm, 0.0, 1.0)
+        else:
+            t_ramp = np.zeros_like(yy)
+        gate_thk = cfg.old_gate_thk_mm + (cfg.old_gate_end_thk_mm - cfg.old_gate_thk_mm) * t_ramp
+    thk[in_gate] = gate_thk[in_gate]
 
-    # well pocket and cold slug (deeper than the fan where they overlap)
-    in_well = r2_axis <= r_well**2
+    # well pocket and cold slug (deeper than the gate where they overlap)
     thk[in_well] = np.maximum(thk[in_well], cfg.well_depth_mm)
     in_slug = r2_axis <= (cfg.slug_d_mm / 2.0) ** 2
     thk[in_slug] = cfg.well_depth_mm + cfg.slug_depth_mm
 
-    # land band: ramp land_end_thk (fan end) → land_flat_thk (flat start), then flat
-    ramp_len = cfg.land_len_mm - cfg.land_flat_len_mm
-    if ramp_len > 1e-12:
-        t_land = np.clip((yy - y_fan_end) / ramp_len, 0.0, 1.0)
-    else:
-        t_land = np.ones_like(yy)
-    land_thk = cfg.land_end_thk_mm + (cfg.land_flat_thk_mm - cfg.land_end_thk_mm) * t_land
-    thk[in_land] = land_thk[in_land]
-    thk[in_land & (yy > y_flat_start)] = cfg.land_flat_thk_mm
+    # tab: ramp tab_end_thk (gate end) → tab_flat_thk (flat start), then flat
+    if cfg.tab_on:
+        ramp_len = cfg.tab_len_mm - cfg.tab_flat_len_mm
+        if ramp_len > 1e-12:
+            t_tab = np.clip((yy - y_gate_end) / ramp_len, 0.0, 1.0)
+        else:
+            t_tab = np.ones_like(yy)
+        tab_thk = cfg.tab_end_thk_mm + (cfg.tab_flat_thk_mm - cfg.tab_end_thk_mm) * t_tab
+        thk[in_tab] = tab_thk[in_tab]
+        thk[in_tab & (yy > y_flat_start)] = cfg.tab_flat_thk_mm
 
     # plate: frame border vs inner body
     in_inner = (
@@ -248,8 +315,8 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         mask=mask,
         thickness_mm=thk,
         cell_size_mm=dx,
-        label="fan_gate_plate",
-        compression_mask=(in_plate | in_land) & mask,
+        label="fan_gate_plate" if cfg.gate_type == "fan" else "old_gate_plate",
+        compression_mask=(in_plate | in_tab) & mask,
         product_mask=in_plate & mask,
         valve_axis_x_mm=cx,
     )
