@@ -70,3 +70,29 @@ def test_a_second_run_removes_the_previous_output_directory():
     assert second != first
     assert second.is_dir() and not first.exists()
     assert Path(at.session_state["mfs_gif_path"]).parent == second
+
+
+def test_changing_an_input_after_a_run_marks_the_result_stale_until_rerun():
+    """Codex P1 on PR #5: the result pane must say when the sidebar no longer
+    matches the run it shows, and the cached result must stay (no silent
+    re-solve)."""
+    at = _app()
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    result = at.session_state["mfs_result"]
+    assert "入力が前回の解析から変更されています" not in _texts(at)
+    at.number_input(key="fg_inner_thk_mm").set_value(3.0).run()
+    assert not at.exception
+    assert "入力が前回の解析から変更されています" in _texts(at)
+    assert at.session_state["mfs_result"] is result
+    # the weld threshold is re-thresholded live, so it must not count as stale
+    at.number_input(key="fg_inner_thk_mm").set_value(4.0).run()
+    assert "入力が前回の解析から変更されています" not in _texts(at)
+    at.slider(key="weld_min_angle").set_value(20).run()
+    assert "入力が前回の解析から変更されています" not in _texts(at)
+    at.number_input(key="fg_inner_thk_mm").set_value(3.0).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert "入力が前回の解析から変更されています" not in _texts(at)
+    assert at.session_state["mfs_result"] is not result

@@ -774,6 +774,38 @@ with col_left:
     )
 
 
+# Signature of every input that shapes the analysis or its rendered assets
+# (the weld threshold is excluded: it is re-thresholded live from the cached
+# result). Stored with a run and compared on every rerun so the result pane
+# can say when it no longer matches the sidebar (Codex P1 on PR #5).
+analysis_inputs = {
+    "geometry": geom_settings,
+    "material": material_key,
+    "injection": (melt_C, mold_C, inj_v, inj_Q),
+    "wall_cooling": (
+        ("skin", c_skin, skin_max_iter, skin_tol, skin_clock_mode)
+        if skin_on
+        else (
+            "multilayer",
+            num_layers,
+            layer_distribution,
+            multilayer_max_iter,
+            multilayer_tol,
+            solid_fraction,
+            shear_heating_enabled,
+        )
+        if multilayer_on
+        else ("none",)
+    ),
+    "compression_molding": (icm, comp_stroke, comp_frac),
+    "two_phase_short_shot": (two_phase_on, shot_volume_cm3),
+    "output": (num_frames, fill_cmap, iso_levels),
+}
+STALE_RESULT_MSG = (
+    "入力が前回の解析から変更されています。表示中の結果は前回の設定のものです。"
+    "「解析実行」で更新してください。"
+)
+
 if do_run:
     # --- セル数ガード（メッシュ下限 0.2mm 開放に伴う安全弁）---
     # 最大寸法のプレート × 0.2mm では cavity が 100 万セルを超え得る。
@@ -1072,6 +1104,7 @@ if do_run:
         # でも下のブロックがこれを拾って表示する。
         st.session_state["mfs_result"] = result
         st.session_state["mfs_settings"] = run_settings
+        st.session_state["mfs_inputs"] = analysis_inputs
         st.session_state["mfs_geom"] = geom
         st.session_state["mfs_skin_on"] = skin_on
         st.session_state["mfs_multilayer_on"] = multilayer_on
@@ -1136,6 +1169,7 @@ def _refresh_weld_assets(min_angle: float) -> None:
 if "mfs_result" in st.session_state:
     if st.session_state.get("mfs_weld_min_angle") != float(weld_min_angle):
         _refresh_weld_assets(float(weld_min_angle))
+    result_is_stale = st.session_state.get("mfs_inputs") != analysis_inputs
     result = st.session_state["mfs_result"]
     geom = st.session_state["mfs_geom"]
     skin_on = st.session_state["mfs_skin_on"]
@@ -1161,6 +1195,8 @@ if "mfs_result" in st.session_state:
 
     with col_right:
         st.subheader("結果")
+        if result_is_stale:
+            st.warning(STALE_RESULT_MSG)
         c1, c2, c3 = st.columns(3)
         c1.metric("総充填時間 T_fill", f"{result.total_fill_time_s:.3f} s")
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
