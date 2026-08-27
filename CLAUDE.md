@@ -6,7 +6,11 @@
 ## 現状（2026-08-27）
 - 形状仕様は `docs/spec.md`、図は `docs/draft/geometry_draft.png`
 - sim の形状非依存モジュールは `core/` に移植済み（v0.1.0）。`geometry.py` は `Geometry` dataclass と
-  `build_demo_geometry` のみで、**ファンゲート用 builder はまだ無い**。次の作業はその builder
+  `build_demo_geometry` のみ
+- ファンゲート builder は `core/fan_gate.py`（`FanGatePlateConfig` / `build_fan_gate_plate_geometry`、v0.2.0）。
+  既定値が spec の実機。圧縮マスク＝製品＋ランド帯、`Geometry.product_mask`（製品のみ）が表示原点を決める
+- 次の候補: sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）を新 builder で書き直す、
+  ファンの多段テーパー（profile_gate 流用）、Streamlit UI（`app.py`）
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 
 ## sim から持ち込まなかったもの
@@ -16,9 +20,12 @@ LGP 専用の builder（FilmGate/FilmGate2/DirectGate）、`profile_gate.py`, `s
 フィクスチャを `build_demo_geometry` に置換、`test_visualizer_3d` は DirectGate の段付きプレート1本を削った。
 これらは新 builder ができたら書き直す。
 
-新 builder（仮称 `FanGatePlateConfig` / `build_fan_gate_plate_geometry`）は sim の `FilmGateConfig`（半円＋台形＋ランド）と
-`profile_gate` の深さプロファイル（平面→傾斜、多段テーパー）を合成して書く。
-**圧縮マスクは製品＋ランド帯 10mm**（sim は製品のみ）。表示原点 y=0 は製品エッジのままにする（`display_origin_mm` の扱いに注意、`docs/spec.md` 参照）。
+## builder の設計メモ
+- 座標は sim と同じ格子系（ゲートブロックが下、製品が上、y は上向き）。表示は `display_origin_mm()` で製品エッジ y=0 に変換
+- Hele-Shaw に縦チャネルは無いので、スプルーは足の φ6 ディスクを Dirichlet 射出点として表す。`sprue_len_mm` / `sprue_top_d_mm` は
+  将来のノズル圧損用に config に持つだけ
+- 井戸 φ20 は深さ 3 のポケット（ファン 2.5 と重なる所は max）、コールドスラッグ φ6 は井戸底からさらに 5（厚み 8）
+- ランド帯は製品全幅、ファンは長辺 250 でランドの 2.5 端に接続。ランド帯外側はランドを横に流れる
 
 ## 運用
 - feature branch + PR + CI green + マージ前レビュー。マージは明示確認を取る
