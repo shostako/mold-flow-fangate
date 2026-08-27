@@ -258,6 +258,8 @@ def test_solver_runs_and_fills_from_the_sprue_outward() -> None:
         dict(sprue_bottom_d_mm=30.0),
         dict(fan_thk_well_mm=0.0),
         dict(inner_thk_mm=-1.0),
+        dict(cell_size_mm=25.0),  # coarser than the well
+        dict(cell_size_mm=520.0),  # whole cavity rasterised away
     ],
 )
 def test_validation_rejects_bad_configs(overrides) -> None:

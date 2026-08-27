@@ -136,6 +136,11 @@ class FanGatePlateConfig:
             raise ValueError(
                 f"sprue_bottom_d_mm ({self.sprue_bottom_d_mm}) must be ≤ well_d_mm ({self.well_d_mm})"
             )
+        if self.cell_size_mm > self.well_d_mm + eps:
+            raise ValueError(
+                f"cell_size_mm ({self.cell_size_mm}) must be ≤ well_d_mm ({self.well_d_mm}); "
+                f"a mesh coarser than the well cannot resolve the gate block"
+            )
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
@@ -194,6 +199,10 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     in_land = (yy > y_fan_end) & (yy <= y_edge) & in_x_plate
     in_plate = (yy > y_edge) & (yy <= y_top) & in_x_plate
     mask = in_half_circle | in_trapezoid | in_land | in_plate
+    if not mask.any():
+        raise ValueError(
+            f"cell_size_mm ({dx}) rasterises the whole cavity away ({ny}x{nx} grid, no cavity cell)"
+        )
 
     # --- thickness ---
     thk = np.zeros_like(xx, dtype=float)
