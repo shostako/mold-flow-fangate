@@ -137,3 +137,32 @@ def test_a_narrow_plate_builds_under_the_old_gate_where_the_fan_width_is_hidden(
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_settings"]["geometry"]["config"]["plate_w_mm"] == 120.0
+
+
+def test_the_balancer_toggle_thins_the_gate_and_follows_the_gate_width():
+    at = _app()
+    assert at.checkbox(key="fg_balancer_on").value is False
+    keys = {n.key for n in at.number_input}
+    assert "fg_balancer_w_mm" not in keys
+    v_plain = at.session_state["mfs_shot_volume_auto"]
+    at.checkbox(key="fg_balancer_on").set_value(True).run()
+    assert not at.exception
+    keys = {n.key for n in at.number_input}
+    assert {"fg_balancer_w_mm", "fg_balancer_h_mm", "fg_balancer_thk_mm"} <= keys
+    d = FanGatePlateConfig()
+    assert at.number_input(key="fg_balancer_w_mm").value == d.balancer_w_mm
+    assert at.number_input(key="fg_balancer_h_mm").value == d.balancer_h_mm
+    assert at.session_state["mfs_shot_volume_auto"] < v_plain
+    # old gate (30 wide): the base-width bound shrinks to the gate and the
+    # default (100) is clamped to it instead of erroring
+    at.radio(key="fg_gate_label").set_value("旧ゲート（タブゲート）").run()
+    assert not at.exception
+    assert "形状パラメータが不正" not in _texts(at)
+    assert at.number_input(key="fg_balancer_w_mm").value == d.old_gate_w_mm
+    at.button[0].click().run()
+    assert not at.exception
+    cfg = at.session_state["mfs_settings"]["geometry"]["config"]
+    assert cfg["balancer_on"] is True and cfg["balancer_w_mm"] == d.old_gate_w_mm
+    # off again: the defaults are recorded, the volume comes back
+    at.checkbox(key="fg_balancer_on").set_value(False).run()
+    assert "fg_balancer_w_mm" not in {n.key for n in at.number_input}

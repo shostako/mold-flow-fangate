@@ -416,6 +416,36 @@ def _fan_gate_sidebar() -> dict:
             "sprue_top_d_mm", "スプルー上端径 φ（参考、解析未使用）[mm]", 0.5, 50.0, 0.5, fmt="%.1f"
         )
         num("sprue_len_mm", "スプルー長 L（参考、解析未使用）[mm]", 1.0, 100.0, 1.0, fmt="%.1f")
+    with st.expander("肉盗み（▽ フローバランサー）", expanded=False):
+        v["balancer_on"] = st.checkbox(
+            "肉盗みを有効化（ゲート端に底辺を置く逆三角形の薄肉部）",
+            value=_D.balancer_on,
+            key="fg_balancer_on",
+            help="底辺はゲート端（タブ／製品エッジとの接続線）、頂点はスプルー側。"
+            "ゲート幅中央に置く。ゲート本体の内側だけ削る（圧縮部には入らない）。",
+        )
+        if v["balancer_on"]:
+            gate_w = v["fan_w_mm"] if v["gate_type"] == "fan" else v["old_gate_w_mm"]
+            h_max = max(v["gate_len_mm"] - v["well_d_mm"] / 2.0, 1.0)
+            # the upper bounds follow the gate; the defaults are clamped so a
+            # narrow gate (old: 30) does not start above its own maximum
+            for field, label, hi in (
+                ("balancer_w_mm", "底辺幅（ゲート端）[mm]", float(gate_w)),
+                ("balancer_h_mm", "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]", float(h_max)),
+            ):
+                v[field] = st.number_input(
+                    label,
+                    min_value=1.0,
+                    max_value=hi,
+                    value=min(float(getattr(_D, field)), hi),
+                    step=1.0,
+                    format="%.1f",
+                    key=f"fg_{field}",
+                )
+            num("balancer_thk_mm", "薄肉部の厚み [mm]", 0.05, 10.0, 0.05)
+        else:
+            for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
+                v[f] = float(getattr(_D, f))
     with st.expander("メッシュ", expanded=False):
         v["cell_size_mm"] = st.slider(
             "メッシュ粗さ [mm/cell]", 0.5, 4.0, float(_D.cell_size_mm), 0.25, key="fg_cell_size_mm"

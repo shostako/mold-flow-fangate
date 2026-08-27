@@ -9,11 +9,12 @@
   `build_demo_geometry` のみ
 - builder は `core/fan_gate.py`（`FanGatePlateConfig` / `build_fan_gate_plate_geometry`）。既定値が spec の実機。
   `gate_type`（fan/old）× `tab_on` の 4 通り（v0.4.0）。圧縮マスク＝製品＋タブ（＝ゲート端より製品側）、
-  `Geometry.product_mask`（製品のみ）が表示原点を決める
+  `Geometry.product_mask`（製品のみ）が表示原点を決める。肉盗み `balancer_*`（v0.5.0）はゲート端に底辺を置く逆三角、
+  ゲート本体でクリップして圧縮部には入らない
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
 - Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
   形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
-- 次の候補: 4 通りの充填順比較（実機不具合の仮説検証）、ファンの多段テーパー（profile_gate 流用）、Issue #2
+- 次の候補: 4 通り（＋肉盗み）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 - Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
   `runtime.txt` は `python-3.12`。deps を変えたら requirements.txt も同期
