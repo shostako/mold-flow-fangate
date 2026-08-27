@@ -11,7 +11,7 @@ JP = FontProperties(fname="/mnt/c/Windows/Fonts/meiryo.ttc")
 PW, PH = 315.0, 183.0        # product
 FRAME, T_FRAME, T_INNER = 15.0, 1.0, 4.0
 GATE_OFF = 50.0              # sprue axis distance from product long edge
-D_EXIT = 3.0                 # gate exit dia (?)
+D_VALVE = 3.0                # valve gate dia (hot-runner valve at sprue top = injection point)
 WELL_D, WELL_DEPTH = 20.0, 3.0
 LAND_W = 250.0               # fan gate width at product edge
 SPRUE_L, SPRUE_TOP, SPRUE_BOT = 15.0, 4.0, 6.0
@@ -29,7 +29,7 @@ ax.add_patch(Polygon(fan, closed=True, fc="#bbdefb", ec="k", lw=1.2))
 ax.add_patch(Wedge((cx, -GATE_OFF), WELL_D / 2, 180, 360, fc="#90caf9", ec="k", lw=1.2))
 ax.add_patch(Circle((cx, -GATE_OFF), WELL_D / 2, fill=False, ec="k", ls="--", lw=0.8))
 ax.add_patch(Circle((cx, -GATE_OFF), SPRUE_BOT / 2, fc="#ef9a9a", ec="k", lw=1))
-ax.add_patch(Circle((cx, -GATE_OFF), D_EXIT / 2, fc="#c62828", ec="k", lw=0.8))
+ax.add_patch(Circle((cx, -GATE_OFF), D_VALVE / 2, fc="#c62828", ec="k", lw=0.8))
 
 def dim(a, p0, p1, txt, off=0, **kw):
     a.annotate("", p0, p1, arrowprops=dict(arrowstyle="<->", lw=0.8))
@@ -43,7 +43,7 @@ dim(ax, (cx - LAND_W / 2, 6), (cx + LAND_W / 2, 6), f"ランド幅 {LAND_W:g}")
 ax.annotate("", (cx + 40, 0), (cx + 40, -GATE_OFF), arrowprops=dict(arrowstyle="<->", lw=0.8))
 ax.text(cx + 43, -GATE_OFF / 2, f"{GATE_OFF:g}", va="center", fontsize=9)
 dim(ax, (cx - WELL_D / 2, -GATE_OFF - 16), (cx + WELL_D / 2, -GATE_OFF - 16), f"井戸 φ{WELL_D:g} 深さ{WELL_DEPTH:g}", off=-9)
-ax.text(cx + 12, -GATE_OFF + 2, f"スプルー下端 φ{SPRUE_BOT:g}\nゲート出口 φ{D_EXIT:g} (?)", fontsize=8, fontproperties=JP)
+ax.text(cx + 12, -GATE_OFF + 2, f"スプルー φ{SPRUE_TOP:g}→φ{SPRUE_BOT:g}\nバルブゲート φ{D_VALVE:g}（射出点、スプルー上端）", fontsize=8, fontproperties=JP)
 ax.text(PW / 2, PH / 2, f"内側 t={T_INNER:g}", ha="center", fontsize=11, fontproperties=JP)
 ax.text(PW / 2, PH - FRAME / 2, f"額縁 幅{FRAME:g} t={T_FRAME:g}", ha="center", va="center", fontsize=9, fontproperties=JP)
 ax.text(cx - 100, -20, f"ファンゲート t=? (仮 {T_FAN:g})", fontsize=9, fontproperties=JP, color="#1565c0")
@@ -60,15 +60,17 @@ az.add_patch(Rectangle((FRAME, -T_INNER), PH - 2 * FRAME, T_INNER, fc="#ffb74d",
 az.add_patch(Rectangle((PH - FRAME, -T_FRAME), FRAME, T_FRAME, fc="#ffe0b2", ec="k"))
 az.add_patch(Rectangle((-GATE_OFF, -T_FAN), GATE_OFF, T_FAN, fc="#bbdefb", ec="k"))
 az.add_patch(Rectangle((-GATE_OFF - WELL_D / 2, -WELL_DEPTH), WELL_D, WELL_DEPTH, fc="#90caf9", ec="k"))
-az.add_patch(Rectangle((-GATE_OFF - SPRUE_BOT / 2, -WELL_DEPTH - SLUG_DEPTH), SPRUE_BOT, SLUG_DEPTH, fc="#e0e0e0", ec="k", hatch="//"))
+slug = [(-GATE_OFF - SPRUE_BOT / 2, -WELL_DEPTH), (-GATE_OFF + SPRUE_BOT / 2, -WELL_DEPTH), (-GATE_OFF + 1.0, -WELL_DEPTH - SLUG_DEPTH), (-GATE_OFF - 1.0, -WELL_DEPTH - SLUG_DEPTH)]
+az.add_patch(Polygon(slug, closed=True, fc="#e0e0e0", ec="k", hatch="//"))
 sprue = [(-GATE_OFF - SPRUE_BOT / 2, 0), (-GATE_OFF + SPRUE_BOT / 2, 0), (-GATE_OFF + SPRUE_TOP / 2, SPRUE_L), (-GATE_OFF - SPRUE_TOP / 2, SPRUE_L)]
 az.add_patch(Polygon(sprue, closed=True, fc="#ef9a9a", ec="k"))
 az.axhline(0, color="k", lw=0.8, ls="--")
 az.text(PH + 2, 0.5, "PL", fontsize=9)
-az.text(-GATE_OFF, SPRUE_L + 1.5, f"φ{SPRUE_TOP:g}", ha="center", fontsize=8)
+az.add_patch(Rectangle((-GATE_OFF - D_VALVE / 2, SPRUE_L), D_VALVE, 1.2, fc="#c62828", ec="k", lw=0.5))
+az.text(-GATE_OFF, SPRUE_L + 2.2, f"φ{SPRUE_TOP:g} ／ バルブゲート φ{D_VALVE:g}（射出点）", ha="center", fontsize=8, fontproperties=JP, color="#c62828")
 az.text(-GATE_OFF + 5, 1, f"φ{SPRUE_BOT:g}", fontsize=8)
 az.text(-GATE_OFF - 25, SPRUE_L / 2, f"スプルーブッシュ L={SPRUE_L:g}", fontsize=8, fontproperties=JP, ha="right")
-az.text(-GATE_OFF - 25, -WELL_DEPTH - SLUG_DEPTH / 2, f"コールドスラッグ 深さ{SLUG_DEPTH:g} (?)", fontsize=8, fontproperties=JP, ha="right")
+az.text(-GATE_OFF - 25, -WELL_DEPTH - SLUG_DEPTH / 2, f"コールドスラッグ（井戸底）深さ{SLUG_DEPTH:g}\n形状・径は要確認（円錐で仮描画）", fontsize=8, fontproperties=JP, ha="right")
 az.text(-GATE_OFF + 12, -WELL_DEPTH - 1.5, f"井戸 深さ{WELL_DEPTH:g}", fontsize=8, fontproperties=JP)
 az.text(-25, -T_FAN - 1.5, "ファン t=?", fontsize=8, fontproperties=JP, color="#1565c0")
 az.text(FRAME + 3, -T_INNER - 1.5, f"t={T_INNER:g}", fontsize=8)
