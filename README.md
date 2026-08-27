@@ -9,6 +9,10 @@
 
 ## 使い方
 
+Streamlit Community Cloud: **<https://mold-flow-fangate.streamlit.app>**
+
+ローカル:
+
 ```
 streamlit run app.py
 ```
