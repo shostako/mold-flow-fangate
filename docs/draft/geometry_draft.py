@@ -10,11 +10,12 @@ JP = FontProperties(fname="/mnt/c/Windows/Fonts/meiryo.ttc")
 # ---- parameters (mm) ----
 PW, PH = 315.0, 183.0        # product
 FRAME, T_FRAME, T_INNER = 15.0, 1.0, 4.0
-GATE_OFF = 50.0              # sprue axis distance from product long edge (要確認: 製品エッジ起点)
+LAND_L = 10.0                # land band length (product edge -> fan)
+FAN_L = 50.0                 # sprue axis distance from the land band's 2.5 mm end (= trapezoid length)
+GATE_OFF = LAND_L + FAN_L    # sprue axis distance from product long edge (derived)
 WELL_D, WELL_DEPTH = 20.0, 3.0
 FAN_W = 250.0                # fan width where it joins the land band
 LAND_W = PW                  # land band spans the full product long edge (linked to PW)
-LAND_L = 10.0                # land band length (product edge -> fan)
 LAND_FLAT_L, T_LAND_FLAT = 2.0, 0.6   # flat part next to product edge
 T_LAND_END = 2.5             # land thickness at fan end (ramp 0.6 -> 2.5 over 2..10 mm)
 T_FAN = 2.5                  # fan gate, uniform (toggle: taper / meat-steal like sim)
@@ -46,17 +47,17 @@ ax.text(PW + 14, PH / 2, f"{PH:g}", va="center", fontsize=9, rotation=90)
 dim(ax, (cx - FAN_W / 2, -LAND_L - 1), (cx + FAN_W / 2, -LAND_L - 1), f"ファン接続幅 {FAN_W:g}", off=-7)
 ax.text(4, -LAND_L - 3, f"ランド {LAND_L:g}（幅は製品長辺 {LAND_W:g} に連動）\n(0–{LAND_FLAT_L:g}: t={T_LAND_FLAT:g} 平面 / {LAND_FLAT_L:g}–{LAND_L:g}: 傾斜→t={T_LAND_END:g})",
         ha="left", va="top", fontsize=8, fontproperties=JP, color="#2e7d32")
-ax.annotate("", (cx + 40, 0), (cx + 40, -GATE_OFF), arrowprops=dict(arrowstyle="<->", lw=0.8))
-ax.text(cx + 43, -GATE_OFF / 2, f"{GATE_OFF:g}（製品エッジ起点）", va="center", fontsize=9, fontproperties=JP)
+ax.annotate("", (cx + 40, -LAND_L), (cx + 40, -GATE_OFF), arrowprops=dict(arrowstyle="<->", lw=0.8))
+ax.text(cx + 43, -(LAND_L + GATE_OFF) / 2, f"{FAN_L:g}（ランド 2.5 端起点）", va="center", fontsize=9, fontproperties=JP)
 dim(ax, (cx - WELL_D / 2, -GATE_OFF - 16), (cx + WELL_D / 2, -GATE_OFF - 16), f"井戸 φ{WELL_D:g} 深さ{WELL_DEPTH:g}", off=-9)
 ax.text(cx + 12, -GATE_OFF + 2, f"スプルー φ{SPRUE_TOP:g}→φ{SPRUE_BOT:g} L={SPRUE_L:g}\nコールドスラッグ φ{SLUG_D:g}×{SLUG_DEPTH:g} 円筒（井戸底）",
         fontsize=8, fontproperties=JP)
 ax.text(PW / 2, PH / 2, f"内側 t={T_INNER:g}", ha="center", fontsize=11, fontproperties=JP)
 ax.text(PW / 2, PH - FRAME / 2, f"額縁 幅{FRAME:g} t={T_FRAME:g}", ha="center", va="center", fontsize=9, fontproperties=JP)
 ax.text(cx - 100, -25, f"ファンゲート t={T_FAN:g} 均一\n（トグルで傾斜／肉盗み）", fontsize=9, fontproperties=JP, color="#1565c0")
-ax.text(cx + 3, PH + 3, "A", fontsize=10, fontweight="bold"); ax.text(cx + 3, -75, "A'", fontsize=10, fontweight="bold")
-ax.plot([cx, cx], [-75, PH + 8], "k-.", lw=0.6)
-ax.set_xlim(-25, PW + 30); ax.set_ylim(-80, PH + 25); ax.set_aspect("equal")
+ax.text(cx + 3, PH + 3, "A", fontsize=10, fontweight="bold"); ax.text(cx + 3, -85, "A'", fontsize=10, fontweight="bold")
+ax.plot([cx, cx], [-85, PH + 8], "k-.", lw=0.6)
+ax.set_xlim(-25, PW + 30); ax.set_ylim(-90, PH + 25); ax.set_aspect("equal")
 ax.set_title("平面図（可動側から見る、単位 mm）", fontproperties=JP)
 ax.set_xlabel("x"); ax.set_ylabel("y")
 
