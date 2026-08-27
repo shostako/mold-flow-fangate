@@ -1,6 +1,6 @@
 # 形状仕様（2026-08-27 ヒアリング＋実物写真で確定）
 
-図: `docs/draft/geometry_draft.png`（`docs/draft/geometry_draft.py` で再生成。matplotlib は sim の .venv を借用中）
+図: `docs/draft/geometry_draft.png`（`docs/draft/geometry_draft.py` で再生成）。builder が実際に作る厚みマップは `docs/fan_gate_thickness.png`
 
 座標系: 製品長辺エッジ（ゲート側）を y=0、製品側を +y、ゲート側を −y。x は長辺方向、ゲート軸は長辺中央。
 
