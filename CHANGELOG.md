@@ -3,6 +3,14 @@
 [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) 準拠、[セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 
+## [0.3.1] — 2026-08-27
+
+### 修正
+
+- 実機ヒアリングの訂正: ランド帯の平面部は t=1.0（額縁と同厚）、傾斜は 1.0→2.0、ファンゲートは t=2.0 均一。
+  `FanGatePlateConfig` の既定値（`land_flat_thk_mm` / `land_end_thk_mm` / `fan_thk_mm`）、`docs/spec.md`、
+  `docs/draft/geometry_draft.png`、`docs/fan_gate_thickness.png` を更新
+
 ## [0.3.0] — 2026-08-27
 
 **Streamlit UI。** sim の `app.py` からソルバ設定・メインパネル（プレビュー／解析実行／充填プレーヤー／圧力／
