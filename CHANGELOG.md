@@ -15,6 +15,7 @@
   `label` は `fan_gate_plate` / `old_gate_plate`
 - `app.py`: ゲート形状のラジオ、タブありチェック。選ばれていない側のウィジェットは出さず既定値を記録に残す
 - `docs/gate_variants_thickness.png`（4 通りの厚みマップ）。`docs/fan_gate_thickness.png` は削除
+- Streamlit Community Cloud にデプロイ: <https://mold-flow-fangate.streamlit.app>（`requirements.txt` / `runtime.txt`、#8）
 - テスト: 4 通りの圧縮マスク＝ゲート端より上、製品体積不変、タブなしの直付け、旧ゲートの輪郭と傾斜、旧ゲートのバリデーション、
   UI のラジオ／チェックの疎通
 - バリデーションは選んだゲート形状の分だけ効く（Codex P1: 旧ゲートで製品幅 < 250 が隠れた `fan_w_mm` に弾かれていた）。
