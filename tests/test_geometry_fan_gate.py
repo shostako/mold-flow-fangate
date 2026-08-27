@@ -35,7 +35,9 @@ def test_every_resolution_yields_an_injection_gate_near_the_axis(cell) -> None:
     yy, xx = _grid_mm(g)
     for iy, ix in g.gates:
         assert g.mask[iy, ix]
-        assert np.hypot(xx[iy, ix] - cfg.axis_x_mm, yy[iy, ix] - cfg.y_axis_mm) <= cell * 1.5
+        r = np.hypot(xx[iy, ix] - cfg.axis_x_mm, yy[iy, ix] - cfg.y_axis_mm)
+        # fine mesh: inside the sprue-foot disc; coarse mesh: the snapped cell
+        assert r <= max(cfg.sprue_bottom_d_mm / 2.0, cell * 1.5) + 1e-9
     HeleShawSolver(geometry=g, material=MaterialDB()["PP"], injection_volume_flow_cm3s=50.0).solve(
         num_frames=2
     )
