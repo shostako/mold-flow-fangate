@@ -23,6 +23,7 @@ LGP 専用の builder（FilmGate/FilmGate2/DirectGate）と `profile_gate.py`, `
 
 新 builder（仮称 `FanGatePlateConfig` / `build_fan_gate_plate_geometry`）は sim の `FilmGateConfig`（半円＋台形＋ランド）と
 `profile_gate` の深さプロファイル（平面→傾斜、多段テーパー）を合成して書く。
+**圧縮マスクは製品＋ランド帯 10mm**（sim は製品のみ）。表示原点 y=0 は製品エッジのままにする（`display_origin_mm` の扱いに注意、`docs/spec.md` 参照）。
 
 ## 運用
 - feature branch + PR + CI green + マージ前レビュー。マージは明示確認を取る
