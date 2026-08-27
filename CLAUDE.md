@@ -5,21 +5,16 @@
 
 ## 現状（2026-08-27）
 - 形状仕様は `docs/spec.md`、図は `docs/draft/geometry_draft.png`
-- コードはまだ無い。次の作業は sim からの形状非依存モジュール移植
+- sim の形状非依存モジュールは `core/` に移植済み（v0.1.0）。`geometry.py` は `Geometry` dataclass と
+  `build_demo_geometry` のみで、**ファンゲート用 builder はまだ無い**。次の作業はその builder
+- 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 
-## 移植計画
-sim の `core/` から **そのままコピー**: `solver.py`, `materials.py`, `visualizer.py`, `visualizer_3d.py`,
-`multilayer_solver.py`, `multilayer_thermal.py`, `two_phase.py`, `fill_player.py`, `settings_record.py`, `version.py`
-＋ `data/`。設定類（`pyproject.toml`, `.github/workflows/ci.yml`, `.streamlit/config.toml`）は名前を変えてコピー。
-
-`geometry.py` は **`Geometry` dataclass と `build_demo_geometry` だけ残す**（テストが使う）。
-LGP 専用の builder（FilmGate/FilmGate2/DirectGate）と `profile_gate.py`, `spec_source.py`, `app.py`, `run_demo.py` は持ち込まない。
-`core/__init__.py` の再エクスポートもそれに合わせて削る。
-
-テストは sim の `tests/` から形状非依存のものを選んで移植: `test_smoke`, `test_solver_1d`, `test_multilayer_*`,
-`test_skin_layer`, `test_fill_player`, `test_fill_render`, `test_short_shot_timeline`, `test_weld_detection`,
-`test_visualizer_*`, `test_version`。`FilmGateConfig` に依存するもの（`test_two_phase`, `test_compression_stroke`,
-`test_settings_record`）は新 builder ができてから書き直す。
+## sim から持ち込まなかったもの
+LGP 専用の builder（FilmGate/FilmGate2/DirectGate）、`profile_gate.py`, `spec_source.py`, `app.py`, `run_demo.py`,
+`data/gate_profiles/`。テストでは `FilmGateConfig` 依存のもの（`test_two_phase`, `test_compression_stroke`,
+`test_settings_record`, `test_geometry_*`, `test_*_ui`）を見送り、`test_multilayer_solver` / `test_visualizer_layer` は
+フィクスチャを `build_demo_geometry` に置換、`test_visualizer_3d` は DirectGate の段付きプレート1本を削った。
+これらは新 builder ができたら書き直す。
 
 新 builder（仮称 `FanGatePlateConfig` / `build_fan_gate_plate_geometry`）は sim の `FilmGateConfig`（半円＋台形＋ランド）と
 `profile_gate` の深さプロファイル（平面→傾斜、多段テーパー）を合成して書く。
