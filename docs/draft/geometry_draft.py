@@ -44,8 +44,8 @@ dim(ax, (0, PH + 10), (PW, PH + 10), f"{PW:g}")
 ax.annotate("", (PW + 10, 0), (PW + 10, PH), arrowprops=dict(arrowstyle="<->", lw=0.8))
 ax.text(PW + 14, PH / 2, f"{PH:g}", va="center", fontsize=9, rotation=90)
 dim(ax, (cx - FAN_W / 2, -LAND_L - 1), (cx + FAN_W / 2, -LAND_L - 1), f"ファン接続幅 {FAN_W:g}", off=-7)
-ax.text(-4, -LAND_L / 2, f"ランド {LAND_L:g}（幅は製品長辺 {LAND_W:g} に連動）\n(0–{LAND_FLAT_L:g}: t={T_LAND_FLAT:g} 平面 / {LAND_FLAT_L:g}–{LAND_L:g}: 傾斜→t={T_LAND_END:g})",
-        ha="right", va="center", fontsize=8, fontproperties=JP, color="#2e7d32")
+ax.text(4, -LAND_L - 3, f"ランド {LAND_L:g}（幅は製品長辺 {LAND_W:g} に連動）\n(0–{LAND_FLAT_L:g}: t={T_LAND_FLAT:g} 平面 / {LAND_FLAT_L:g}–{LAND_L:g}: 傾斜→t={T_LAND_END:g})",
+        ha="left", va="top", fontsize=8, fontproperties=JP, color="#2e7d32")
 ax.annotate("", (cx + 40, 0), (cx + 40, -GATE_OFF), arrowprops=dict(arrowstyle="<->", lw=0.8))
 ax.text(cx + 43, -GATE_OFF / 2, f"{GATE_OFF:g}（製品エッジ起点）", va="center", fontsize=9, fontproperties=JP)
 dim(ax, (cx - WELL_D / 2, -GATE_OFF - 16), (cx + WELL_D / 2, -GATE_OFF - 16), f"井戸 φ{WELL_D:g} 深さ{WELL_DEPTH:g}", off=-9)
