@@ -10,7 +10,9 @@
 - ファンゲート builder は `core/fan_gate.py`（`FanGatePlateConfig` / `build_fan_gate_plate_geometry`、v0.2.0）。
   既定値が spec の実機。圧縮マスク＝製品＋ランド帯、`Geometry.product_mask`（製品のみ）が表示原点を決める
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
-- 次の候補: ファンの多段テーパー（profile_gate 流用）、Streamlit UI（`app.py`）、Issue #2
+- Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
+  形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
+- 次の候補: Streamlit Cloud デプロイ、ファンの多段テーパー（profile_gate 流用）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 
 ## sim から持ち込まなかったもの
