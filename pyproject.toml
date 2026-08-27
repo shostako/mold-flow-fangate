@@ -27,7 +27,7 @@ dependencies = [
     "scipy>=1.10",
     "matplotlib>=3.7",
     "Pillow>=10.0",
-    "streamlit>=1.28",
+    "streamlit>=1.36",  # st.columns(vertical_alignment=)
     "plotly>=5.18",
 ]
 

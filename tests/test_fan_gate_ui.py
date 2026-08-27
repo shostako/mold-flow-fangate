@@ -51,3 +51,22 @@ def test_a_bad_parameter_is_an_error_message_not_a_crash():
     assert not at.exception
     assert "形状パラメータが不正" in _texts(at)
     assert "mfs_geom" not in at.session_state
+
+
+def test_a_second_run_removes_the_previous_output_directory():
+    """Codex P2 on PR #5: every run makes a fresh temp dir; the superseded one
+    must go when the new results replace it."""
+    from pathlib import Path
+
+    at = _app()
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    first = Path(at.session_state["mfs_tmp_dir"])
+    assert first.is_dir()
+    at.button[0].click().run()
+    assert not at.exception
+    second = Path(at.session_state["mfs_tmp_dir"])
+    assert second != first
+    assert second.is_dir() and not first.exists()
+    assert Path(at.session_state["mfs_gif_path"]).parent == second

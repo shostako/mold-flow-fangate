@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import tempfile
 import zipfile
 from pathlib import Path
@@ -935,7 +936,7 @@ if do_run:
 
         # 重い PNG/GIF レンダリングはここで一回だけやる。後段の widget 操作で
         # rerun が走っても再生成しないよう、すべて session_state に置く。
-        _tmp_dir = Path(tempfile.mkdtemp())
+        _tmp_dir = Path(tempfile.mkdtemp(prefix="mfs_"))
         _gif_path = render_fill_animation(
             result,
             _tmp_dir / "fill.gif",
@@ -1075,6 +1076,13 @@ if do_run:
         st.session_state["mfs_skin_on"] = skin_on
         st.session_state["mfs_multilayer_on"] = multilayer_on
         st.session_state["mfs_num_frames"] = num_frames
+        # The previous run's assets are unreachable once the paths below are
+        # replaced; drop them so repeated runs on a long-lived server do not
+        # fill the temp filesystem (Codex P2 on PR #5). Done here, after the
+        # new assets exist, so a failed render keeps the old results intact.
+        _prev_tmp = st.session_state.get("mfs_tmp_dir")
+        if _prev_tmp is not None and Path(_prev_tmp) != _tmp_dir:
+            shutil.rmtree(_prev_tmp, ignore_errors=True)
         st.session_state["mfs_tmp_dir"] = _tmp_dir
         st.session_state["mfs_gif_path"] = _gif_path
         st.session_state["mfs_player_html"] = _player_html
