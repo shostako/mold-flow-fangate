@@ -3,6 +3,14 @@
 [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) 準拠、[セマンティック バージョニング](https://semver.org/lang/ja/) に従う。
 `0.x` 系のため、マイナー版の更新に後方非互換の変更を含むことがある。
 
+## [0.2.1] — 2026-08-27
+
+### テスト
+
+- sim で `FilmGateConfig` に依存していた `test_two_phase` / `test_compression_stroke` / `test_settings_record` を
+  `FanGatePlateConfig` で書き直して移植（62 本）。段付きプレートは額縁 0.35／内側 0.50 で代替、
+  圧縮ゾーン均一のケースは額縁＝内側＝ランド＝0.5 で作る
+
 ## [0.2.0] — 2026-08-27
 
 **ファンゲート付き額縁プレートの形状 builder。**
