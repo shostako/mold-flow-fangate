@@ -5,15 +5,15 @@ the product like sim's film gate)::
 
     y_plate_top   = y_edge + plate_h
     y_edge        = y_fan_end + land_len         product long edge (display y = 0)
-    y_flat_start  = y_edge - land_flat_len       land: flat 0.6 next to the edge
-    y_fan_end     = y_axis + fan_len             land: ramp end (2.5), fan long edge
+    y_flat_start  = y_edge - land_flat_len       land: flat 1.0 next to the edge
+    y_fan_end     = y_axis + fan_len             land: ramp end (2.0), fan long edge
     y_axis        = pad + well_d / 2             sprue axis = well center = trapezoid
                                                  short edge (width = well_d)
     y = pad                                      half-circle bottom
 
 Silhouette = half-circle (well) ∪ trapezoid (fan) ∪ land band ∪ plate.
 The land band spans the **full product width** (not the fan width); the
-fan's long edge (``fan_w``) joins the land's 2.5 mm end.
+fan's long edge (``fan_w``) joins the land's 2.0 mm end.
 
 Thickness (mm, continuous in y except at the frame/inner step):
 
@@ -59,12 +59,12 @@ class FanGatePlateConfig:
     # land band (product edge → fan), full product width
     land_len_mm: float = 10.0
     land_flat_len_mm: float = 2.0
-    land_flat_thk_mm: float = 0.6
-    land_end_thk_mm: float = 2.5
+    land_flat_thk_mm: float = 1.0
+    land_end_thk_mm: float = 2.0
     # fan gate: trapezoid long edge (land side) → short edge = well_d (axis line)
     fan_w_mm: float = 250.0
-    fan_len_mm: float = 50.0  # axis line → land 2.5 end
-    fan_thk_mm: float = 2.5  # at the land end (uniform when fan_thk_well_mm is None)
+    fan_len_mm: float = 50.0  # axis line → land 2.0 end
+    fan_thk_mm: float = 2.0  # at the land end (uniform when fan_thk_well_mm is None)
     fan_thk_well_mm: float | None = None  # at the axis line; enables a linear taper
     # well (pocket at the sprue foot) and cold slug
     well_d_mm: float = 20.0
