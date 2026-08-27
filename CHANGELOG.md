@@ -17,6 +17,8 @@
 - `docs/gate_variants_thickness.png`（4 通りの厚みマップ）。`docs/fan_gate_thickness.png` は削除
 - テスト: 4 通りの圧縮マスク＝ゲート端より上、製品体積不変、タブなしの直付け、旧ゲートの輪郭と傾斜、旧ゲートのバリデーション、
   UI のラジオ／チェックの疎通
+- バリデーションは選んだゲート形状の分だけ効く（Codex P1: 旧ゲートで製品幅 < 250 が隠れた `fan_w_mm` に弾かれていた）。
+  旧ゲートは `gate_len_mm ≥ old_gate_ramp_len_mm + well_d_mm / 2`（Codex P2: 傾斜が井戸円に食い込む／円がゲート端を越える）
 
 ### 変更（後方非互換）
 

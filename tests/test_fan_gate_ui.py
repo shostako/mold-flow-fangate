@@ -123,3 +123,17 @@ def test_the_gate_radio_and_tab_toggle_reach_the_builder():
     assert cfg["gate_type"] == "old" and cfg["tab_on"] is False
     assert cfg["old_gate_w_mm"] == FanGatePlateConfig().old_gate_w_mm
     assert at.session_state["mfs_geom"].label == "old_gate_plate"
+
+
+def test_a_narrow_plate_builds_under_the_old_gate_where_the_fan_width_is_hidden():
+    """Codex P1 on PR #7: the hidden fan_w_mm default (250) must not veto an
+    old-gate plate narrower than that."""
+    at = _app()
+    at.radio(key="fg_gate_label").set_value("旧ゲート（タブゲート）").run()
+    at.number_input(key="fg_plate_w_mm").set_value(120.0).run()
+    assert not at.exception
+    assert "形状パラメータが不正" not in _texts(at)
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert at.session_state["mfs_settings"]["geometry"]["config"]["plate_w_mm"] == 120.0

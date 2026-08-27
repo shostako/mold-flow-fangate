@@ -391,6 +391,12 @@ def test_old_gate_fills_from_the_sprue_outward_too() -> None:
     [
         dict(gate_type="film"),
         dict(gate_type="old", old_gate_ramp_len_mm=50.0),  # ramp longer than the gate
+        dict(
+            gate_type="old", old_gate_ramp_len_mm=31.0
+        ),  # ramp starts inside the well disc (40 - 31 < 10)
+        dict(
+            gate_type="old", gate_len_mm=8.0, old_gate_ramp_len_mm=0.0
+        ),  # disc top beyond the gate end
         dict(gate_type="old", old_gate_w_mm=400.0),  # wider than the plate
         dict(gate_type="old", old_gate_thk_mm=0.0),
         dict(gate_type="old", old_gate_ramp_len_mm=-1.0),
@@ -405,3 +411,26 @@ def test_old_gate_limits_are_not_enforced_on_the_fan_gate() -> None:
     # the fan-gate defaults with a tiny gate_len (shorter than the old-gate ramp) must build
     g = build_fan_gate_plate_geometry(_cfg(gate_type="fan", gate_len_mm=8.0))
     assert g.mask.any()
+
+
+def test_fan_limits_are_not_enforced_on_the_old_gate() -> None:
+    """Codex P1 on PR #7: the UI hides fan_w_mm (250) under the old gate, so a
+    plate narrower than the fan must still build there."""
+    cfg = _cfg(gate_type="old", plate_w_mm=120.0, plate_h_mm=80.0)
+    assert cfg.fan_w_mm > cfg.plate_w_mm
+    g = build_fan_gate_plate_geometry(cfg)
+    assert g.mask.any() and g.gates
+    with pytest.raises(ValueError):
+        build_fan_gate_plate_geometry(_cfg(gate_type="fan", plate_w_mm=120.0, plate_h_mm=80.0))
+
+
+def test_old_gate_ramp_may_start_exactly_at_the_well_top() -> None:
+    """Codex P2 on PR #7: the boundary case gate_len = ramp + well radius is legal
+    and keeps the whole well at old_gate_thk."""
+    cfg = _cfg(gate_type="old", gate_len_mm=25.0, old_gate_ramp_len_mm=15.0)
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    r = np.hypot(xx - cfg.axis_x_mm, yy - cfg.y_axis_mm)
+    well_ring = g.mask & (r >= cfg.slug_d_mm / 2 + 0.5) & (r <= cfg.well_d_mm / 2 - 0.5)
+    assert np.all(g.thickness_mm[well_ring] == cfg.old_gate_thk_mm)
+    assert not g.compression_mask[r <= cfg.well_d_mm / 2 - 0.5].any()

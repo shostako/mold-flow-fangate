@@ -148,23 +148,30 @@ class FanGatePlateConfig:
             raise ValueError(
                 f"tab_flat_len_mm ({self.tab_flat_len_mm}) must be ≤ tab_len_mm ({self.tab_len_mm})"
             )
-        if self.gate_type == "old":
-            if self.old_gate_ramp_len_mm > self.gate_len_mm + eps:
+        if self.gate_type == "fan":
+            if self.fan_w_mm > self.plate_w_mm + eps:
                 raise ValueError(
-                    f"old_gate_ramp_len_mm ({self.old_gate_ramp_len_mm}) must be ≤ "
-                    f"gate_len_mm ({self.gate_len_mm})"
+                    f"fan_w_mm ({self.fan_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
+                )
+            if self.fan_w_mm < self.well_d_mm - eps:
+                raise ValueError(
+                    f"fan_w_mm ({self.fan_w_mm}) must be ≥ well_d_mm ({self.well_d_mm}); "
+                    f"inverted trapezoid is not supported"
+                )
+        else:
+            # the full well disc sits inside the constant-thickness part of the
+            # gate: the ramp starts at or above the disc top, and the disc top is
+            # at or below the gate end (else it would leak into the tab/product)
+            if self.old_gate_ramp_len_mm + self.well_d_mm / 2.0 > self.gate_len_mm + eps:
+                raise ValueError(
+                    f"old gate: gate_len_mm ({self.gate_len_mm}) must be ≥ "
+                    f"old_gate_ramp_len_mm ({self.old_gate_ramp_len_mm}) + well_d_mm / 2 "
+                    f"({self.well_d_mm / 2.0}) so the well stays in the constant-thickness part"
                 )
             if self.old_gate_w_mm > self.plate_w_mm + eps:
                 raise ValueError(
                     f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
                 )
-        if self.fan_w_mm > self.plate_w_mm + eps:
-            raise ValueError(f"fan_w_mm ({self.fan_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})")
-        if self.fan_w_mm < self.well_d_mm - eps:
-            raise ValueError(
-                f"fan_w_mm ({self.fan_w_mm}) must be ≥ well_d_mm ({self.well_d_mm}); "
-                f"inverted trapezoid is not supported"
-            )
         if self.slug_d_mm > self.well_d_mm + eps:
             raise ValueError(f"slug_d_mm ({self.slug_d_mm}) must be ≤ well_d_mm ({self.well_d_mm})")
         if self.sprue_bottom_d_mm > self.well_d_mm + eps:
