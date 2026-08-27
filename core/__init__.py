@@ -1,6 +1,6 @@
 """mold-flow-fangate core package."""
 
-from .fan_gate import FanGatePlateConfig, build_fan_gate_plate_geometry
+from .fan_gate import GATE_TYPES, FanGatePlateConfig, build_fan_gate_plate_geometry
 from .fill_player import (
     CONTROLS_HEIGHT_PX,
     build_fill_player_html,
@@ -32,6 +32,7 @@ __all__ = [
     "cross_wlf_viscosity",
     "Geometry",
     "build_demo_geometry",
+    "GATE_TYPES",
     "FanGatePlateConfig",
     "build_fan_gate_plate_geometry",
     "HeleShawSolver",

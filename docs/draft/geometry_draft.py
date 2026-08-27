@@ -1,4 +1,7 @@
-"""Draft sketch of the fan-gate plate geometry (spec as of 2026-08-27, after photo review)."""
+"""Draft sketch of the fan-gate plate geometry (spec as of 2026-08-27, after photo review).
+
+Shown: fan gate with the tab. The builder also does the old tab gate and no-tab
+variants; see docs/gate_variants_thickness.png for the rasterised four."""
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -10,9 +13,9 @@ JP = FontProperties(fname="/mnt/c/Windows/Fonts/meiryo.ttc")
 # ---- parameters (mm) ----
 PW, PH = 315.0, 183.0        # product
 FRAME, T_FRAME, T_INNER = 15.0, 1.0, 4.0
-LAND_L = 10.0                # land band length (product edge -> fan)
-FAN_L = 50.0                 # sprue axis distance from the land band's 2.0 mm end (= trapezoid length)
-GATE_OFF = LAND_L + FAN_L    # sprue axis distance from product long edge (derived)
+LAND_L = 10.0                # tab (full-width land) length, product edge -> gate end; toggle
+FAN_L = 40.0                 # gate length: sprue axis -> gate end (= compression-zone boundary)
+GATE_OFF = LAND_L + FAN_L    # sprue axis distance from product long edge (derived; 40 without the tab)
 WELL_D, WELL_DEPTH = 20.0, 3.0
 FAN_W = 250.0                # fan width where it joins the land band
 LAND_W = PW                  # land band spans the full product long edge (linked to PW)
@@ -45,16 +48,16 @@ dim(ax, (0, PH + 10), (PW, PH + 10), f"{PW:g}")
 ax.annotate("", (PW + 10, 0), (PW + 10, PH), arrowprops=dict(arrowstyle="<->", lw=0.8))
 ax.text(PW + 14, PH / 2, f"{PH:g}", va="center", fontsize=9, rotation=90)
 dim(ax, (cx - FAN_W / 2, -LAND_L - 1), (cx + FAN_W / 2, -LAND_L - 1), f"ファン接続幅 {FAN_W:g}", off=-7)
-ax.text(4, -LAND_L - 3, f"ランド {LAND_L:g}（幅は製品長辺 {LAND_W:g} に連動）\n(0–{LAND_FLAT_L:g}: t={T_LAND_FLAT:g} 平面 / {LAND_FLAT_L:g}–{LAND_L:g}: 傾斜→t={T_LAND_END:g})",
+ax.text(4, -LAND_L - 3, f"タブ {LAND_L:g}（全幅ランド、幅は製品長辺 {LAND_W:g} に連動、有無を選択）\n(0–{LAND_FLAT_L:g}: t={T_LAND_FLAT:g} 平面 / {LAND_FLAT_L:g}–{LAND_L:g}: 傾斜→t={T_LAND_END:g})",
         ha="left", va="top", fontsize=8, fontproperties=JP, color="#2e7d32")
 ax.annotate("", (cx + 40, -LAND_L), (cx + 40, -GATE_OFF), arrowprops=dict(arrowstyle="<->", lw=0.8))
-ax.text(cx + 43, -(LAND_L + GATE_OFF) / 2, f"{FAN_L:g}（ランド 2.0 端起点）", va="center", fontsize=9, fontproperties=JP)
+ax.text(cx + 43, -(LAND_L + GATE_OFF) / 2, f"{FAN_L:g}（ゲート端＝圧縮部境界 起点）\n製品エッジから {GATE_OFF:g}", va="center", fontsize=9, fontproperties=JP)
 dim(ax, (cx - WELL_D / 2, -GATE_OFF - 16), (cx + WELL_D / 2, -GATE_OFF - 16), f"井戸 φ{WELL_D:g} 深さ{WELL_DEPTH:g}", off=-9)
 ax.text(cx + 12, -GATE_OFF + 2, f"スプルー φ{SPRUE_TOP:g}→φ{SPRUE_BOT:g} L={SPRUE_L:g}\nコールドスラッグ φ{SLUG_D:g}×{SLUG_DEPTH:g} 円筒（井戸底）",
         fontsize=8, fontproperties=JP)
 ax.text(PW / 2, PH / 2, f"内側 t={T_INNER:g}", ha="center", fontsize=11, fontproperties=JP)
 ax.text(PW / 2, PH - FRAME / 2, f"額縁 幅{FRAME:g} t={T_FRAME:g}", ha="center", va="center", fontsize=9, fontproperties=JP)
-ax.text(cx - 60, -40, f"ファンゲート t={T_FAN:g} 均一\n（トグルで傾斜／肉盗み）", fontsize=9, fontproperties=JP, color="#1565c0")
+ax.text(cx - 60, -40, f"ファンゲート t={T_FAN:g} 均一（トグルで傾斜）\n旧ゲート: 幅 30、t4.0 → 端 15mm で 4.0→2.0", fontsize=9, fontproperties=JP, color="#1565c0")
 ax.text(cx + 3, PH + 3, "A", fontsize=10, fontweight="bold"); ax.text(cx + 3, -85, "A'", fontsize=10, fontweight="bold")
 ax.plot([cx, cx], [-85, PH + 8], "k-.", lw=0.6)
 ax.set_xlim(-25, PW + 30); ax.set_ylim(-90, PH + 25); ax.set_aspect("equal")
@@ -81,7 +84,7 @@ az.text(-GATE_OFF - 25, SPRUE_L / 2, f"スプルーブッシュ L={SPRUE_L:g}", 
 az.text(-GATE_OFF - 25, -WELL_DEPTH - SLUG_DEPTH / 2, f"コールドスラッグ φ{SLUG_D:g} 深さ{SLUG_DEPTH:g}（円筒）", fontsize=8, fontproperties=JP, ha="right")
 az.text(-GATE_OFF + 12, -WELL_DEPTH - 1.5, f"井戸 深さ{WELL_DEPTH:g}", fontsize=8, fontproperties=JP)
 az.text(-48, -T_FAN - 1.5, f"ファン t={T_FAN:g}", fontsize=8, fontproperties=JP, color="#1565c0")
-az.text(-LAND_L + 1, 1.0, f"ランド 傾斜 {T_LAND_END:g}→{T_LAND_FLAT:g}", fontsize=7, fontproperties=JP, color="#2e7d32")
+az.text(-LAND_L + 1, 1.0, f"タブ 傾斜 {T_LAND_END:g}→{T_LAND_FLAT:g}", fontsize=7, fontproperties=JP, color="#2e7d32")
 az.text(-LAND_FLAT_L - 1, -T_LAND_END - 1.5, f"平面 {LAND_FLAT_L:g}mm t={T_LAND_FLAT:g}", fontsize=7, fontproperties=JP, color="#2e7d32", ha="center")
 az.text(FRAME + 3, -T_INNER - 1.5, f"t={T_INNER:g}", fontsize=8)
 az.text(2, -T_FRAME - 1.5, f"t={T_FRAME:g}", fontsize=8)

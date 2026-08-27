@@ -96,3 +96,30 @@ def test_changing_an_input_after_a_run_marks_the_result_stale_until_rerun():
     assert not at.exception
     assert "入力が前回の解析から変更されています" not in _texts(at)
     assert at.session_state["mfs_result"] is not result
+
+
+def test_the_gate_radio_and_tab_toggle_reach_the_builder():
+    at = _app()
+    assert at.radio(key="fg_gate_label").value == "ファンゲート"
+    assert at.checkbox(key="fg_tab_on").value is True
+    v_fan_tab = at.session_state["mfs_shot_volume_auto"]
+    # old gate: the fan widgets go away, the old-gate widgets appear
+    at.radio(key="fg_gate_label").set_value("旧ゲート（タブゲート）").run()
+    assert not at.exception
+    assert "fg_old_gate_w_mm" in at.session_state
+    keys = {n.key for n in at.number_input}
+    assert "fg_old_gate_w_mm" in keys and "fg_fan_w_mm" not in keys
+    v_old_tab = at.session_state["mfs_shot_volume_auto"]
+    assert v_old_tab < v_fan_tab
+    # tab off: the tab expander goes away, the cavity shrinks again
+    at.checkbox(key="fg_tab_on").set_value(False).run()
+    assert not at.exception
+    keys = {n.key for n in at.number_input}
+    assert "fg_tab_len_mm" not in keys
+    assert at.session_state["mfs_shot_volume_auto"] < v_old_tab
+    at.button[0].click().run()
+    assert not at.exception
+    cfg = at.session_state["mfs_settings"]["geometry"]["config"]
+    assert cfg["gate_type"] == "old" and cfg["tab_on"] is False
+    assert cfg["old_gate_w_mm"] == FanGatePlateConfig().old_gate_w_mm
+    assert at.session_state["mfs_geom"].label == "old_gate_plate"

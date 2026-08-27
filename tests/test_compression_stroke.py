@@ -35,12 +35,12 @@ def _stepped_cfg(**overrides) -> FanGatePlateConfig:
         frame_w_mm=15.0,
         frame_thk_mm=0.35,
         inner_thk_mm=0.50,
-        land_len_mm=6.0,
-        land_flat_len_mm=2.0,
-        land_flat_thk_mm=0.3,
-        land_end_thk_mm=1.0,
+        tab_len_mm=6.0,
+        tab_flat_len_mm=2.0,
+        tab_flat_thk_mm=0.3,
+        tab_end_thk_mm=1.0,
         fan_w_mm=80.0,
-        fan_len_mm=20.0,
+        gate_len_mm=20.0,
         fan_thk_mm=2.0,
         well_d_mm=12.0,
         well_depth_mm=3.0,
@@ -180,8 +180,8 @@ def test_uniform_plate_stroke_factor_equivalence_for_T_fill() -> None:
     cfg = _stepped_cfg(
         frame_thk_mm=0.50,
         inner_thk_mm=0.50,
-        land_flat_thk_mm=0.50,
-        land_end_thk_mm=0.50,
+        tab_flat_thk_mm=0.50,
+        tab_end_thk_mm=0.50,
     )
     g = build_fan_gate_plate_geometry(cfg)
 
