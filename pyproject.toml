@@ -45,7 +45,7 @@ Issues = "https://github.com/shostako/mold-flow-fangate/issues"
 packages = ["core"]
 
 [tool.setuptools.package-data]
-"*" = ["data/*.json"]
+core = ["data/*.json"]
 
 # ---------- ruff ----------
 [tool.ruff]
