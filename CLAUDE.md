@@ -13,8 +13,10 @@
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
 - Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
   形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
-- 次の候補: 4 通りの充填順比較（実機不具合の仮説検証）、Streamlit Cloud デプロイ、ファンの多段テーパー（profile_gate 流用）、Issue #2
+- 次の候補: 4 通りの充填順比較（実機不具合の仮説検証）、ファンの多段テーパー（profile_gate 流用）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
+- Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
+  `runtime.txt` は `python-3.12`。deps を変えたら requirements.txt も同期
 
 ## sim から持ち込まなかったもの
 LGP 専用の builder（FilmGate/FilmGate2/DirectGate）、`profile_gate.py`, `spec_source.py`, `app.py`, `run_demo.py`,
