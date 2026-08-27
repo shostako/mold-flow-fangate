@@ -16,6 +16,11 @@
 - 数式説明の圧縮成形の項を「製品＋ランド帯が膨張、ゲートブロックは不変」に更新
 - UI テスト: `test_fan_gate_ui`（既定値の記録、製品体積表示、テーパー切替、形状エラー）、sim から `test_two_phase_ui` /
   `test_weld_ui` を移植。`tests/ui_helpers.py` の `app(fast=True)` で 4 mm セル・12 フレームに落として高速化
+- 入力が前回の解析から変わると結果ペイン先頭に警告（結果は比較用に残す）。解析実行ごとに前回の出力ディレクトリを削除
+
+### 変更
+
+- Streamlit の下限を 1.36 に（`st.columns(vertical_alignment=)`）
 
 ## [0.2.1] — 2026-08-27
 
