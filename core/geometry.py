@@ -34,6 +34,11 @@ class Geometry:
     # (only the product body is True). Cells outside ``mask`` are ignored
     # regardless of the value here.
     compression_mask: np.ndarray | None = None
+    # Product body proper, when it differs from ``compression_mask`` (the
+    # fan-gate plate compresses product + gate land together, but the
+    # display origin must still sit on the product edge). ``None`` means
+    # "the compression zone is the product" (sim's builders).
+    product_mask: np.ndarray | None = None
     # Nominal valve-axis x [mm, grid frame] for the display origin. Set by
     # the parametric builders from the configured valve position; when None
     # the display falls back to the rasterized gate-cell centroid (which an
@@ -96,14 +101,15 @@ class Geometry:
 
         ``x0`` is the nominal valve axis when the builder recorded it
         (``valve_axis_x_mm``), else the gate-cell centroid. ``y0`` is the **bottom edge of
-        the product zone** (the ``compression_mask`` cells, which every
-        builder sets to the product plate body), so the product's gate-side
-        edge reads ``y = 0``: a film gate's gate block / runner sits at
-        ``y < 0`` and a direct gate's gate lands inside the product at
-        ``y > 0`` — one product-referenced convention for both. Falls back
-        to the gate centroid ``y`` when there is no product marker (legacy
-        demo geometry), and to the grid center / bottom (0, 0) corner when
-        the geometry has no gates.
+        the product zone** (``product_mask`` when the builder set one, else
+        the ``compression_mask`` cells, which sim's builders set to the
+        product plate body), so the product's gate-side edge reads ``y = 0``:
+        a film gate's gate block / runner sits at ``y < 0`` and a direct
+        gate's gate lands inside the product at ``y > 0`` — one
+        product-referenced convention for both. Falls back to the gate
+        centroid ``y`` when there is no product marker (legacy demo
+        geometry), and to the grid center / bottom (0, 0) corner when the
+        geometry has no gates.
         """
         if not self.gates:
             return float(self.nx * self.cell_size_mm) / 2.0, 0.0
@@ -118,7 +124,8 @@ class Geometry:
         else:
             x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
         y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
-        product = None if self.compression_mask is None else (self.mask & self.compression_mask)
+        marker = self.product_mask if self.product_mask is not None else self.compression_mask
+        product = None if marker is None else (self.mask & marker)
         if product is not None and product.any():
             y0 = float(np.where(product)[0].min()) * self.cell_size_mm
         return x0, y0
