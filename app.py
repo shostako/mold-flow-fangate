@@ -416,6 +416,60 @@ def _fan_gate_sidebar() -> dict:
             "sprue_top_d_mm", "スプルー上端径 φ（参考、解析未使用）[mm]", 0.5, 50.0, 0.5, fmt="%.1f"
         )
         num("sprue_len_mm", "スプルー長 L（参考、解析未使用）[mm]", 1.0, 100.0, 1.0, fmt="%.1f")
+    with st.expander("肉盗み（▽ フローバランサー）", expanded=False):
+        v["balancer_on"] = st.checkbox(
+            "肉盗みを有効化（ゲート端に底辺を置く逆三角形の薄肉部）",
+            value=_D.balancer_on,
+            key="fg_balancer_on",
+            help="底辺はゲート端（タブ／製品エッジとの接続線）、頂点はスプルー側。"
+            "ゲート幅中央に置く。ゲート本体の内側だけ削る（圧縮部には入らない）。",
+        )
+        # the bounds come from the config itself (single source with validate());
+        # v holds every field the limits depend on by this point
+        w_max, h_max, thk_sup = FanGatePlateConfig(**v).balancer_limits_mm
+        W_MIN, H_MIN, THK_MIN, THK_STEP = 1.0, 1.0, 0.05, 0.05
+        thk_hi = round(thk_sup - THK_STEP, 2)
+        if v["balancer_on"] and (h_max < H_MIN or w_max < W_MIN or thk_hi < THK_MIN):
+            st.warning(
+                "この形状には肉盗みを置けない（ゲート長 − 井戸半径 = "
+                f"{h_max:.1f} mm、ゲート端の幅 {w_max:.1f} mm、ゲート端の厚み {thk_sup:.2f} mm）。"
+                "ゲートを長く／広く／厚くするか、肉盗みを OFF にする。"
+            )
+            v["balancer_on"] = False
+        if v["balancer_on"]:
+            # the upper bounds follow the gate; the defaults are clamped so a
+            # narrow gate (old: 30) does not start above its own maximum
+            for field, label, lo, hi, step, fmt in (
+                ("balancer_w_mm", "底辺幅（ゲート端）[mm]", W_MIN, w_max, 1.0, "%.1f"),
+                (
+                    "balancer_h_mm",
+                    "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]",
+                    H_MIN,
+                    h_max,
+                    1.0,
+                    "%.1f",
+                ),
+                (
+                    "balancer_thk_mm",
+                    "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
+                    THK_MIN,
+                    thk_hi,
+                    THK_STEP,
+                    "%.2f",
+                ),
+            ):
+                v[field] = st.number_input(
+                    label,
+                    min_value=lo,
+                    max_value=float(hi),
+                    value=min(float(getattr(_D, field)), float(hi)),
+                    step=step,
+                    format=fmt,
+                    key=f"fg_{field}",
+                )
+        else:
+            for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
+                v[f] = float(getattr(_D, f))
     with st.expander("メッシュ", expanded=False):
         v["cell_size_mm"] = st.slider(
             "メッシュ粗さ [mm/cell]", 0.5, 4.0, float(_D.cell_size_mm), 0.25, key="fg_cell_size_mm"

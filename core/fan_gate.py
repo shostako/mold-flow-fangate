@@ -29,6 +29,19 @@ land). ``tab_flat_thk`` on ``[y_flat_start, y_edge]``, linear
 the tab the product edge sits directly on the gate end (the gate keeps its
 shape; the product moves toward the sprue).
 
+Balancer (``balancer_on``, sim's ▽ 肉盗み): an inverted isosceles triangle
+carved into the gate body, centred on the axis. Its base (``balancer_w``
+wide) lies on the gate end line so it touches the tab / product edge; its
+apex points at the sprue, ``balancer_h`` below the gate end. Inside it the
+thickness is ``min(gate, balancer_thk)`` (a cut never adds material;
+painted after the gate thickness, before the well / slug), and ``validate``
+requires ``balancer_thk`` below the gate thickness on the gate end line
+(where the base sits), so the ▽ is a real cut at least along its base. Intersected with the gate body as a guard; under ``validate``
+(base ≤ gate width on the gate end line, apex above the well) the ▽ lies
+inside the trapezoid / rectangle anyway, since both half-widths are linear
+in y and the gate's is ≥ the ▽'s at both ends. Not part of the compression
+zone.
+
 Plate: ``frame_thk`` on the ``frame_w`` border, ``inner_thk`` inside.
 Well: disc ``well_d`` at the axis, thickness ``max(well_depth, gate)``.
 Cold slug: disc ``slug_d`` under the axis, ``well_depth + slug_depth``.
@@ -85,6 +98,11 @@ class FanGatePlateConfig:
     old_gate_thk_mm: float = 4.0
     old_gate_ramp_len_mm: float = 15.0
     old_gate_end_thk_mm: float = 2.0
+    # balancer: inverted triangle thinning, base on the gate end line, apex toward the sprue
+    balancer_on: bool = False
+    balancer_w_mm: float = 100.0  # base width on the gate end line
+    balancer_h_mm: float = 20.0  # gate end → apex
+    balancer_thk_mm: float = 1.0  # thickness inside the triangle
     # well (pocket at the sprue foot) and cold slug
     well_d_mm: float = 20.0
     well_depth_mm: float = 3.0
@@ -177,6 +195,31 @@ class FanGatePlateConfig:
                     f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
                     f"a mesh coarser than the gate body leaves the well disconnected"
                 )
+        if self.balancer_on:
+            for name, val in (
+                ("balancer_w_mm", self.balancer_w_mm),
+                ("balancer_h_mm", self.balancer_h_mm),
+                ("balancer_thk_mm", self.balancer_thk_mm),
+            ):
+                if val <= 0:
+                    raise ValueError(f"{name} must be positive when balancer_on (got {val})")
+            w_max, h_max, thk_sup = self.balancer_limits_mm
+            if self.balancer_thk_mm >= thk_sup - eps:
+                raise ValueError(
+                    f"balancer_thk_mm ({self.balancer_thk_mm}) must be < the gate thickness at "
+                    f"the gate end ({thk_sup}); a balancer is a cut, it cannot add material"
+                )
+            if self.balancer_w_mm > w_max + eps:
+                raise ValueError(
+                    f"balancer_w_mm ({self.balancer_w_mm}) must be ≤ the gate width at the "
+                    f"gate end ({w_max})"
+                )
+            # the apex must stay clear of the well disc (sim: clear of the valve disk)
+            if self.balancer_h_mm > h_max + eps:
+                raise ValueError(
+                    f"balancer_h_mm ({self.balancer_h_mm}) must be ≤ gate_len_mm − well_d_mm / 2 "
+                    f"({h_max}) so the apex stays outside the well"
+                )
         if self.slug_d_mm > self.well_d_mm + eps:
             raise ValueError(f"slug_d_mm ({self.slug_d_mm}) must be ≤ well_d_mm ({self.well_d_mm})")
         if self.sprue_bottom_d_mm > self.well_d_mm + eps:
@@ -188,6 +231,28 @@ class FanGatePlateConfig:
                 f"cell_size_mm ({self.cell_size_mm}) must be ≤ well_d_mm ({self.well_d_mm}); "
                 f"a mesh coarser than the well cannot resolve the gate block"
             )
+
+    @property
+    def gate_end_thk_mm(self) -> float:
+        """Gate thickness on the gate end line, where the balancer base sits.
+        The old gate without a ramp keeps ``old_gate_thk`` all the way to the
+        end (``old_gate_end_thk`` is then unused by the builder)."""
+        if self.gate_type == "fan":
+            return self.fan_thk_mm
+        if self.old_gate_ramp_len_mm <= 0:
+            return self.old_gate_thk_mm
+        return self.old_gate_end_thk_mm
+
+    @property
+    def balancer_limits_mm(self) -> tuple[float, float, float]:
+        """``(w_max, h_max, thk_sup)`` for the balancer: base width ≤ the gate
+        width on the gate end line, height ≤ ``gate_len − well_d / 2`` (apex
+        outside the well), thickness < the gate thickness on the gate end
+        line (a cut has to remove material at least along its base). The
+        single source for :meth:`validate` and the sidebar bounds."""
+        w_max = self.fan_w_mm if self.gate_type == "fan" else self.old_gate_w_mm
+        h_max = self.gate_len_mm - self.well_d_mm / 2.0
+        return w_max, h_max, self.gate_end_thk_mm
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
@@ -281,6 +346,20 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
             t_ramp = np.zeros_like(yy)
         gate_thk = cfg.old_gate_thk_mm + (cfg.old_gate_end_thk_mm - cfg.old_gate_thk_mm) * t_ramp
     thk[in_gate] = gate_thk[in_gate]
+
+    # balancer: base on the gate end line (touches the tab / product edge),
+    # apex balancer_h toward the sprue; half-width grows linearly apex → base
+    if cfg.balancer_on:
+        y_apex = y_gate_end - cfg.balancer_h_mm
+        t_bal = np.clip((yy - y_apex) / max(cfg.balancer_h_mm, 1e-12), 0.0, 1.0)
+        in_balancer = (
+            in_gate_body
+            & (yy >= y_apex)
+            & (yy <= y_gate_end)
+            & (ax <= 0.5 * cfg.balancer_w_mm * t_bal)
+        )
+        # a cut cannot add material: never raise the gate thickness (Codex P1 on PR #9)
+        thk[in_balancer] = np.minimum(thk[in_balancer], cfg.balancer_thk_mm)
 
     # well pocket and cold slug (deeper than the gate where they overlap)
     thk[in_well] = np.maximum(thk[in_well], cfg.well_depth_mm)

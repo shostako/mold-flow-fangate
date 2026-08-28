@@ -434,3 +434,209 @@ def test_old_gate_ramp_may_start_exactly_at_the_well_top() -> None:
     well_ring = g.mask & (r >= cfg.slug_d_mm / 2 + 0.5) & (r <= cfg.well_d_mm / 2 - 0.5)
     assert np.all(g.thickness_mm[well_ring] == cfg.old_gate_thk_mm)
     assert not g.compression_mask[r <= cfg.well_d_mm / 2 - 0.5].any()
+
+
+# ------------------------------------------------------------ balancer
+
+
+def _balancer_cells(cfg, g):
+    """Analytic ▽ membership on the cell centres: base on the gate end line,
+    apex ``balancer_h`` toward the sprue, half-width linear apex → base."""
+    yy, xx = _grid_mm(g)
+    y_apex = cfg.y_gate_end_mm - cfg.balancer_h_mm
+    t = np.clip((yy - y_apex) / cfg.balancer_h_mm, 0.0, 1.0)
+    inside = (
+        (yy >= y_apex)
+        & (yy <= cfg.y_gate_end_mm)
+        & (np.abs(xx - cfg.axis_x_mm) <= 0.5 * cfg.balancer_w_mm * t)
+    )
+    return inside & g.mask
+
+
+def test_balancer_is_off_by_default_and_leaves_the_geometry_unchanged() -> None:
+    base = build_fan_gate_plate_geometry(_cfg())
+    off = build_fan_gate_plate_geometry(_cfg(balancer_on=False, balancer_thk_mm=0.1))
+    assert np.array_equal(base.thickness_mm, off.thickness_mm)
+    assert np.array_equal(base.mask, off.mask)
+
+
+@pytest.mark.parametrize("gate_type,w", [("fan", 100.0), ("old", 30.0)])
+def test_balancer_is_an_inverted_triangle_with_its_base_on_the_gate_end(gate_type, w) -> None:
+    cfg = _cfg(gate_type=gate_type, balancer_on=True, balancer_w_mm=w, balancer_h_mm=20.0)
+    g = build_fan_gate_plate_geometry(cfg)
+    g0 = build_fan_gate_plate_geometry(_cfg(gate_type=gate_type))
+    yy, xx = _grid_mm(g)
+    ax = np.abs(xx - cfg.axis_x_mm)
+    inside = _balancer_cells(cfg, g)
+    assert inside.any()
+    assert np.all(g.thickness_mm[inside] == cfg.balancer_thk_mm)
+    # everything else is untouched (mask included)
+    assert np.array_equal(g.mask, g0.mask)
+    assert np.array_equal(g.thickness_mm[~inside], g0.thickness_mm[~inside])
+    # base row: the last gate row is thinned over the full base width and
+    # the first tab row above it is not (the triangle touches the land)
+    dx = g.cell_size_mm
+    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy < cfg.y_gate_end_mm)
+    first_tab = g.mask & (yy > cfg.y_gate_end_mm) & (yy < cfg.y_gate_end_mm + dx)
+    assert np.all(g.thickness_mm[last_gate & (ax < w / 2 - dx)] == cfg.balancer_thk_mm)
+    assert np.all(g.thickness_mm[last_gate & (ax > w / 2 + dx)] != cfg.balancer_thk_mm)
+    assert np.all(g.thickness_mm[first_tab] == g0.thickness_mm[first_tab])
+    # apex: on the axis the thinning stops at gate end − h; below it the gate is intact
+    y_apex = cfg.y_gate_end_mm - cfg.balancer_h_mm
+    on_axis = ax < dx
+    assert np.all(
+        g.thickness_mm[g.mask & on_axis & (yy > y_apex + dx) & (yy < cfg.y_gate_end_mm)]
+        == cfg.balancer_thk_mm
+    )
+    below = g.mask & on_axis & (yy < y_apex - dx) & (yy > cfg.y_axis_mm + cfg.well_d_mm / 2 + dx)
+    assert below.any() and np.all(g.thickness_mm[below] == g0.thickness_mm[below])
+    # centred: the thinned cells' x-offsets from the axis are a set closed under negation
+    off = np.sort(xx[inside] - cfg.axis_x_mm)
+    assert np.allclose(off, -off[::-1])
+    # volume drops by (area × Δt); area ≈ w·h/2
+    removed = (g0.volume_cm3() - g.volume_cm3()) * 1000.0
+    d_thk = g0.thickness_mm[inside] - cfg.balancer_thk_mm
+    assert removed == pytest.approx(float(d_thk.sum()) * dx**2, rel=1e-9)
+    assert removed == pytest.approx(0.5 * w * cfg.balancer_h_mm * d_thk.mean(), rel=0.05)
+
+
+def test_balancer_is_not_compressed_and_does_not_reach_the_well() -> None:
+    cfg = _cfg(balancer_on=True, balancer_h_mm=30.0)
+    assert cfg.balancer_h_mm == cfg.gate_len_mm - cfg.well_d_mm / 2  # the legal maximum
+    g = build_fan_gate_plate_geometry(cfg)
+    inside = _balancer_cells(cfg, g)
+    assert not g.compression_mask[inside].any()
+    yy, xx = _grid_mm(g)
+    r = np.hypot(xx - cfg.axis_x_mm, yy - cfg.y_axis_mm)
+    well = g.mask & (r <= cfg.well_d_mm / 2 - 0.5)
+    assert not inside[well].any()
+    assert np.all(g.thickness_mm[well] >= cfg.well_depth_mm)
+
+
+def test_balancer_at_its_bounds_stays_inside_the_gate_body() -> None:
+    # base = fan width, height = the legal maximum: the ▽ touches the fan's
+    # slanted edges at the gate end and the well top at the apex, and every
+    # thinned cell is a gate cell (the in_gate_body guard has nothing to clip)
+    cfg = _cfg(balancer_on=True, balancer_w_mm=250.0, balancer_h_mm=30.0)
+    g = build_fan_gate_plate_geometry(cfg)
+    g0 = build_fan_gate_plate_geometry(_cfg())
+    assert np.array_equal(g.mask, g0.mask)
+    yy, _ = _grid_mm(g)
+    # (the frame and the tab flat are 1.0 too: look at the gate block only)
+    thin = (g.thickness_mm == cfg.balancer_thk_mm) & (yy <= cfg.y_gate_end_mm)
+    assert thin.any() and np.all(g.mask[thin])
+    assert np.array_equal(thin, _balancer_cells(cfg, g))
+
+
+def test_balancer_solves() -> None:
+    cfg = _cfg(balancer_on=True, cell_size_mm=2.0)
+    g = build_fan_gate_plate_geometry(cfg)
+    r = HeleShawSolver(
+        geometry=g, material=MaterialDB()["PP"], injection_volume_flow_cm3s=50.0
+    ).solve(num_frames=4)
+    assert np.isfinite(r.fill_time_s[g.mask]).all()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(balancer_on=True, balancer_w_mm=260.0),  # wider than the fan
+        dict(balancer_on=True, gate_type="old", balancer_w_mm=31.0),  # wider than the old gate
+        dict(balancer_on=True, balancer_h_mm=31.0),  # apex inside the well (40 − 10 = 30)
+        dict(balancer_on=True, balancer_thk_mm=0.0),
+        dict(balancer_on=True, balancer_thk_mm=2.0),  # = fan thickness: no cut anywhere
+        dict(balancer_on=True, balancer_thk_mm=10.0),  # thicker than the fan (Codex P1 on PR #9)
+        dict(gate_type="old", balancer_on=True, balancer_w_mm=30.0, old_gate_end_thk_mm=0.5),
+        dict(balancer_on=True, balancer_w_mm=0.0),
+        dict(balancer_on=True, balancer_h_mm=-1.0),
+    ],
+)
+def test_validation_rejects_bad_balancer_configs(overrides) -> None:
+    with pytest.raises(ValueError):
+        build_fan_gate_plate_geometry(_cfg(**overrides))
+
+
+def test_balancer_only_needs_to_cut_at_its_base() -> None:
+    # a taper thinner than the balancer upstream is fine: the base still cuts
+    g = build_fan_gate_plate_geometry(_cfg(balancer_on=True, fan_thk_well_mm=0.8))
+    assert g.mask.any()
+
+
+def test_balancer_limits_are_ignored_while_it_is_off() -> None:
+    g = build_fan_gate_plate_geometry(
+        _cfg(balancer_on=False, balancer_w_mm=999.0, balancer_h_mm=999.0)
+    )
+    assert g.mask.any()
+
+
+def test_balancer_never_adds_material_where_the_gate_is_already_thinner() -> None:
+    """Codex P1 on PR #9: the balancer is a cut. Where the tapered fan is
+    already below ``balancer_thk`` the gate thickness must stay, not grow."""
+    cfg = _cfg(
+        balancer_on=True,
+        balancer_thk_mm=1.5,
+        balancer_h_mm=30.0,
+        fan_thk_well_mm=1.0,
+        fan_thk_mm=2.0,
+    )
+    assert cfg.gate_end_thk_mm == 2.0
+    g = build_fan_gate_plate_geometry(cfg)
+    g0 = build_fan_gate_plate_geometry(_cfg(fan_thk_well_mm=1.0, fan_thk_mm=2.0))
+    inside = _balancer_cells(cfg, g)
+    assert inside.any()
+    assert np.all(g.thickness_mm[inside] <= g0.thickness_mm[inside] + 1e-12)
+    assert np.all(g.thickness_mm[inside] <= cfg.balancer_thk_mm + 1e-12)
+    # near the base (fan at 2.0) it cuts to 1.5; near the apex the taper is
+    # below 1.5 already and is left alone
+    assert (g.thickness_mm[inside] == cfg.balancer_thk_mm).any()
+    assert (g.thickness_mm[inside] < cfg.balancer_thk_mm).any()
+    assert g.volume_cm3() < g0.volume_cm3()
+
+
+def test_old_gate_without_a_ramp_lets_the_balancer_cut_from_the_full_gate_thickness() -> None:
+    """Local review on PR #9: with ramp length 0 the builder never applies
+    ``old_gate_end_thk`` (the gate end is at ``old_gate_thk``), so the limit
+    must follow the thickness that actually exists there."""
+    cfg = _cfg(
+        gate_type="old",
+        old_gate_ramp_len_mm=0.0,
+        balancer_on=True,
+        balancer_w_mm=30.0,
+        balancer_thk_mm=3.0,
+    )
+    assert cfg.gate_end_thk_mm == cfg.old_gate_thk_mm == 4.0
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    dx = g.cell_size_mm
+    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy < cfg.y_gate_end_mm)
+    on_axis = np.abs(xx - cfg.axis_x_mm) < dx
+    assert np.all(g.thickness_mm[last_gate & on_axis] == 3.0)
+    # and 4.0 (≥ the gate thickness there) is rejected as no cut at all
+    with pytest.raises(ValueError):
+        build_fan_gate_plate_geometry(_cfg(**{**cfg.__dict__, "balancer_thk_mm": 4.0}))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(),
+        dict(gate_type="old"),
+        dict(gate_type="old", old_gate_ramp_len_mm=0.0),
+        dict(fan_thk_well_mm=0.8, fan_w_mm=120.0, gate_len_mm=25.0),
+    ],
+)
+def test_balancer_limits_are_exactly_what_validate_enforces(overrides) -> None:
+    """The sidebar takes its bounds from ``balancer_limits_mm``; the values on
+    the bounds must build and one step beyond must not, for every gate type."""
+    base = _cfg(**overrides)
+    w_max, h_max, thk_sup = base.balancer_limits_mm
+    ok = dict(base.__dict__, balancer_on=True, balancer_w_mm=w_max, balancer_h_mm=h_max)
+    ok["balancer_thk_mm"] = thk_sup - 0.05
+    assert build_fan_gate_plate_geometry(_cfg(**ok)).mask.any()
+    for bad in (
+        dict(balancer_w_mm=w_max + 0.5),
+        dict(balancer_h_mm=h_max + 0.5),
+        dict(balancer_thk_mm=thk_sup),
+    ):
+        with pytest.raises(ValueError):
+            build_fan_gate_plate_geometry(_cfg(**{**ok, **bad}))
