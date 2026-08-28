@@ -36,8 +36,11 @@ apex points at the sprue, ``balancer_h`` below the gate end. Inside it the
 thickness is ``min(gate, balancer_thk)`` (a cut never adds material;
 painted after the gate thickness, before the well / slug), and ``validate``
 requires ``balancer_thk`` below the gate thickness on the gate end line
-(where the base sits), so the ▽ is a real cut at least along its base. Clipped to the gate body, so a base wider than the gate at
-that row simply loses its corners. Not part of the compression zone.
+(where the base sits), so the ▽ is a real cut at least along its base. Intersected with the gate body as a guard; under ``validate``
+(base ≤ gate width on the gate end line, apex above the well) the ▽ lies
+inside the trapezoid / rectangle anyway, since both half-widths are linear
+in y and the gate's is ≥ the ▽'s at both ends. Not part of the compression
+zone.
 
 Plate: ``frame_thk`` on the ``frame_w`` border, ``inner_thk`` inside.
 Well: disc ``well_d`` at the axis, thickness ``max(well_depth, gate)``.

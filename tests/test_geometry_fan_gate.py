@@ -513,15 +513,19 @@ def test_balancer_is_not_compressed_and_does_not_reach_the_well() -> None:
     assert np.all(g.thickness_mm[well] >= cfg.well_depth_mm)
 
 
-def test_balancer_wider_than_the_fan_row_is_clipped_to_the_gate_body() -> None:
-    # a tall triangle whose base equals the fan width: near the apex the fan
-    # is narrower than the trapezoid rows would need, so the ▽ loses corners
+def test_balancer_at_its_bounds_stays_inside_the_gate_body() -> None:
+    # base = fan width, height = the legal maximum: the ▽ touches the fan's
+    # slanted edges at the gate end and the well top at the apex, and every
+    # thinned cell is a gate cell (the in_gate_body guard has nothing to clip)
     cfg = _cfg(balancer_on=True, balancer_w_mm=250.0, balancer_h_mm=30.0)
     g = build_fan_gate_plate_geometry(cfg)
     g0 = build_fan_gate_plate_geometry(_cfg())
     assert np.array_equal(g.mask, g0.mask)
-    thin = g.thickness_mm == cfg.balancer_thk_mm
+    yy, _ = _grid_mm(g)
+    # (the frame and the tab flat are 1.0 too: look at the gate block only)
+    thin = (g.thickness_mm == cfg.balancer_thk_mm) & (yy <= cfg.y_gate_end_mm)
     assert thin.any() and np.all(g.mask[thin])
+    assert np.array_equal(thin, _balancer_cells(cfg, g))
 
 
 def test_balancer_solves() -> None:
