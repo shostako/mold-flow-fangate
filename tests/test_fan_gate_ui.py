@@ -176,3 +176,25 @@ def test_the_balancer_toggle_thins_the_gate_and_follows_the_gate_width():
     # off again: the defaults are recorded, the volume comes back
     at.checkbox(key="fg_balancer_on").set_value(False).run()
     assert "fg_balancer_w_mm" not in {n.key for n in at.number_input}
+
+
+def test_a_gate_too_short_for_a_balancer_warns_instead_of_an_unfixable_error():
+    """Local review on PR #9: with gate_len − well_d/2 below the 1 mm widget
+    minimum the old sidebar pinned the height at 1.0 and validate() rejected
+    every rerun. Now the expander says why and the balancer is left off."""
+    at = _app()
+    at.number_input(key="fg_gate_len_mm").set_value(8.0).run()
+    assert not at.exception
+    at.checkbox(key="fg_balancer_on").set_value(True).run()
+    assert not at.exception
+    assert "形状パラメータが不正" not in _texts(at)
+    assert "肉盗みを置けない" in _texts(at)
+    assert "fg_balancer_h_mm" not in {n.key for n in at.number_input}
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    assert at.session_state["mfs_settings"]["geometry"]["config"]["balancer_on"] is False
+    # a long enough gate brings the widgets back
+    at.number_input(key="fg_gate_len_mm").set_value(40.0).run()
+    assert "fg_balancer_h_mm" in {n.key for n in at.number_input}
+    assert "肉盗みを置けない" not in _texts(at)

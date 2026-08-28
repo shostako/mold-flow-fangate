@@ -424,35 +424,49 @@ def _fan_gate_sidebar() -> dict:
             help="底辺はゲート端（タブ／製品エッジとの接続線）、頂点はスプルー側。"
             "ゲート幅中央に置く。ゲート本体の内側だけ削る（圧縮部には入らない）。",
         )
+        # the bounds come from the config itself (single source with validate());
+        # v holds every field the limits depend on by this point
+        w_max, h_max, thk_sup = FanGatePlateConfig(**v).balancer_limits_mm
+        W_MIN, H_MIN, THK_MIN, THK_STEP = 1.0, 1.0, 0.05, 0.05
+        thk_hi = round(thk_sup - THK_STEP, 2)
+        if v["balancer_on"] and (h_max < H_MIN or w_max < W_MIN or thk_hi < THK_MIN):
+            st.warning(
+                "この形状には肉盗みを置けない（ゲート長 − 井戸半径 = "
+                f"{h_max:.1f} mm、ゲート端の幅 {w_max:.1f} mm、ゲート端の厚み {thk_sup:.2f} mm）。"
+                "ゲートを長く／広く／厚くするか、肉盗みを OFF にする。"
+            )
+            v["balancer_on"] = False
         if v["balancer_on"]:
-            gate_w = v["fan_w_mm"] if v["gate_type"] == "fan" else v["old_gate_w_mm"]
-            h_max = max(v["gate_len_mm"] - v["well_d_mm"] / 2.0, 1.0)
             # the upper bounds follow the gate; the defaults are clamped so a
             # narrow gate (old: 30) does not start above its own maximum
-            for field, label, hi in (
-                ("balancer_w_mm", "底辺幅（ゲート端）[mm]", float(gate_w)),
-                ("balancer_h_mm", "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]", float(h_max)),
+            for field, label, lo, hi, step, fmt in (
+                ("balancer_w_mm", "底辺幅（ゲート端）[mm]", W_MIN, w_max, 1.0, "%.1f"),
+                (
+                    "balancer_h_mm",
+                    "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]",
+                    H_MIN,
+                    h_max,
+                    1.0,
+                    "%.1f",
+                ),
+                (
+                    "balancer_thk_mm",
+                    "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
+                    THK_MIN,
+                    thk_hi,
+                    THK_STEP,
+                    "%.2f",
+                ),
             ):
                 v[field] = st.number_input(
                     label,
-                    min_value=1.0,
-                    max_value=hi,
-                    value=min(float(getattr(_D, field)), hi),
-                    step=1.0,
-                    format="%.1f",
+                    min_value=lo,
+                    max_value=float(hi),
+                    value=min(float(getattr(_D, field)), float(hi)),
+                    step=step,
+                    format=fmt,
                     key=f"fg_{field}",
                 )
-            gate_end_thk = v["fan_thk_mm"] if v["gate_type"] == "fan" else v["old_gate_end_thk_mm"]
-            thk_hi = max(round(gate_end_thk - 0.05, 2), 0.05)
-            v["balancer_thk_mm"] = st.number_input(
-                "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
-                min_value=0.05,
-                max_value=thk_hi,
-                value=min(float(_D.balancer_thk_mm), thk_hi),
-                step=0.05,
-                format="%.2f",
-                key="fg_balancer_thk_mm",
-            )
         else:
             for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
                 v[f] = float(getattr(_D, f))

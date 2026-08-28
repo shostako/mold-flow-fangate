@@ -587,3 +587,52 @@ def test_balancer_never_adds_material_where_the_gate_is_already_thinner() -> Non
     assert (g.thickness_mm[inside] == cfg.balancer_thk_mm).any()
     assert (g.thickness_mm[inside] < cfg.balancer_thk_mm).any()
     assert g.volume_cm3() < g0.volume_cm3()
+
+
+def test_old_gate_without_a_ramp_lets_the_balancer_cut_from_the_full_gate_thickness() -> None:
+    """Local review on PR #9: with ramp length 0 the builder never applies
+    ``old_gate_end_thk`` (the gate end is at ``old_gate_thk``), so the limit
+    must follow the thickness that actually exists there."""
+    cfg = _cfg(
+        gate_type="old",
+        old_gate_ramp_len_mm=0.0,
+        balancer_on=True,
+        balancer_w_mm=30.0,
+        balancer_thk_mm=3.0,
+    )
+    assert cfg.gate_end_thk_mm == cfg.old_gate_thk_mm == 4.0
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    dx = g.cell_size_mm
+    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy < cfg.y_gate_end_mm)
+    on_axis = np.abs(xx - cfg.axis_x_mm) < dx
+    assert np.all(g.thickness_mm[last_gate & on_axis] == 3.0)
+    # and 4.0 (≥ the gate thickness there) is rejected as no cut at all
+    with pytest.raises(ValueError):
+        build_fan_gate_plate_geometry(_cfg(**{**cfg.__dict__, "balancer_thk_mm": 4.0}))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(),
+        dict(gate_type="old"),
+        dict(gate_type="old", old_gate_ramp_len_mm=0.0),
+        dict(fan_thk_well_mm=0.8, fan_w_mm=120.0, gate_len_mm=25.0),
+    ],
+)
+def test_balancer_limits_are_exactly_what_validate_enforces(overrides) -> None:
+    """The sidebar takes its bounds from ``balancer_limits_mm``; the values on
+    the bounds must build and one step beyond must not, for every gate type."""
+    base = _cfg(**overrides)
+    w_max, h_max, thk_sup = base.balancer_limits_mm
+    ok = dict(base.__dict__, balancer_on=True, balancer_w_mm=w_max, balancer_h_mm=h_max)
+    ok["balancer_thk_mm"] = thk_sup - 0.05
+    assert build_fan_gate_plate_geometry(_cfg(**ok)).mask.any()
+    for bad in (
+        dict(balancer_w_mm=w_max + 0.5),
+        dict(balancer_h_mm=h_max + 0.5),
+        dict(balancer_thk_mm=thk_sup),
+    ):
+        with pytest.raises(ValueError):
+            build_fan_gate_plate_geometry(_cfg(**{**ok, **bad}))

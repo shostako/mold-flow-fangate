@@ -200,19 +200,18 @@ class FanGatePlateConfig:
             ):
                 if val <= 0:
                     raise ValueError(f"{name} must be positive when balancer_on (got {val})")
-            gate_w = self.fan_w_mm if self.gate_type == "fan" else self.old_gate_w_mm
-            if self.balancer_thk_mm >= self.gate_end_thk_mm - eps:
+            w_max, h_max, thk_sup = self.balancer_limits_mm
+            if self.balancer_thk_mm >= thk_sup - eps:
                 raise ValueError(
                     f"balancer_thk_mm ({self.balancer_thk_mm}) must be < the gate thickness at "
-                    f"the gate end ({self.gate_end_thk_mm}); a balancer is a cut, it cannot add material"
+                    f"the gate end ({thk_sup}); a balancer is a cut, it cannot add material"
                 )
-            if self.balancer_w_mm > gate_w + eps:
+            if self.balancer_w_mm > w_max + eps:
                 raise ValueError(
                     f"balancer_w_mm ({self.balancer_w_mm}) must be ≤ the gate width at the "
-                    f"gate end ({gate_w})"
+                    f"gate end ({w_max})"
                 )
             # the apex must stay clear of the well disc (sim: clear of the valve disk)
-            h_max = self.gate_len_mm - self.well_d_mm / 2.0
             if self.balancer_h_mm > h_max + eps:
                 raise ValueError(
                     f"balancer_h_mm ({self.balancer_h_mm}) must be ≤ gate_len_mm − well_d_mm / 2 "
@@ -233,9 +232,24 @@ class FanGatePlateConfig:
     @property
     def gate_end_thk_mm(self) -> float:
         """Gate thickness on the gate end line, where the balancer base sits.
-        The balancer must cut below it (upstream the gate may already be
-        thinner; there the cut is a no-op via ``minimum``)."""
-        return self.fan_thk_mm if self.gate_type == "fan" else self.old_gate_end_thk_mm
+        The old gate without a ramp keeps ``old_gate_thk`` all the way to the
+        end (``old_gate_end_thk`` is then unused by the builder)."""
+        if self.gate_type == "fan":
+            return self.fan_thk_mm
+        if self.old_gate_ramp_len_mm <= 0:
+            return self.old_gate_thk_mm
+        return self.old_gate_end_thk_mm
+
+    @property
+    def balancer_limits_mm(self) -> tuple[float, float, float]:
+        """``(w_max, h_max, thk_sup)`` for the balancer: base width ≤ the gate
+        width on the gate end line, height ≤ ``gate_len − well_d / 2`` (apex
+        outside the well), thickness < the gate thickness on the gate end
+        line (a cut has to remove material at least along its base). The
+        single source for :meth:`validate` and the sidebar bounds."""
+        w_max = self.fan_w_mm if self.gate_type == "fan" else self.old_gate_w_mm
+        h_max = self.gate_len_mm - self.well_d_mm / 2.0
+        return w_max, h_max, self.gate_end_thk_mm
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
