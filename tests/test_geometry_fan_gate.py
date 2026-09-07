@@ -67,10 +67,11 @@ def test_thickness_is_zero_outside_mask() -> None:
 
 
 def test_product_volume_matches_the_analytic_frame_plate() -> None:
-    # well φ23 puts the frame/inner boundary exactly on mm-grid cell centres
-    # (y_edge + frame_w = 81.5), so exact analytic equality needs the 0.5 mm
-    # grid, where every geometry boundary is a cell edge
-    cfg = _cfg(cell_size_mm=0.5)
+    # exact at the default 1 mm grid: grid_shift_mm keeps the product edge and
+    # the frame/inner boundary on cell edges even with the φ23 well (whose
+    # half-radius would otherwise put them on cell centres, Codex P2 on PR #11)
+    cfg = _cfg()
+    assert cfg.grid_shift_mm == pytest.approx(0.5)
     g = build_fan_gate_plate_geometry(cfg)
     inner_w = cfg.plate_w_mm - 2 * cfg.frame_w_mm
     inner_h = cfg.plate_h_mm - 2 * cfg.frame_w_mm
@@ -78,6 +79,23 @@ def test_product_volume_matches_the_analytic_frame_plate() -> None:
     expected = (frame_area * cfg.frame_thk_mm + inner_w * inner_h * cfg.inner_thk_mm) / 1000.0
     got = float(g.thickness_mm[g.product_mask].sum()) * g.cell_size_mm**2 / 1000.0
     assert got == pytest.approx(expected, rel=1e-6)
+
+
+def test_the_rendered_plate_is_independent_of_the_well_diameter() -> None:
+    """Codex P2 on PR #11: a half-integer well radius (φ23) put every y-level
+    on mm-grid cell centres and the rendered plate moved with the well —
+    origin off by half a cell, one frame/inner row misassigned.
+    ``grid_shift_mm`` must keep the plate raster identical instead."""
+    volumes, offsets = [], []
+    for wd in (20.0, 21.0, 23.0):  # shifts 0, 0.5, 0.5
+        cfg = _cfg(well_d_mm=wd)
+        g = build_fan_gate_plate_geometry(cfg)
+        volumes.append(float(g.thickness_mm[g.product_mask].sum()) * g.cell_size_mm**2)
+        _, y0 = g.display_origin_mm()
+        offsets.append(y0 - cfg.y_edge_mm)
+    assert volumes[0] == pytest.approx(volumes[1], rel=1e-12)
+    assert volumes[0] == pytest.approx(volumes[2], rel=1e-12)
+    assert offsets == [pytest.approx(0.0)] * 3
 
 
 # ------------------------------------------------------------- thickness
@@ -203,9 +221,10 @@ def test_compression_zone_is_product_plus_land_and_excludes_the_gate_block() -> 
 
 
 def test_display_origin_sits_on_the_product_edge_not_the_land() -> None:
-    # 0.5 mm grid: with well φ23 the product edge lies on mm-grid cell
-    # centres, which would shift the rasterised origin by half a cell
-    cfg = _cfg(cell_size_mm=0.5)
+    # exact at the default grid thanks to grid_shift_mm (the φ23 well would
+    # otherwise put the product edge on a cell centre and the origin off by
+    # half a cell)
+    cfg = _cfg()
     g = build_fan_gate_plate_geometry(cfg)
     x0, y0 = g.display_origin_mm()
     assert x0 == pytest.approx(cfg.axis_x_mm)
@@ -283,9 +302,7 @@ def test_validation_rejects_bad_configs(overrides) -> None:
 def test_every_gate_tab_combination_builds_with_the_same_axis_and_gate_end(
     gate_type, tab_on
 ) -> None:
-    # 0.5 mm grid so the analytic volume comparison stays exact (well φ23
-    # puts the frame/inner boundary on mm-grid cell centres)
-    cfg = _cfg(gate_type=gate_type, tab_on=tab_on, cell_size_mm=0.5)
+    cfg = _cfg(gate_type=gate_type, tab_on=tab_on)
     g = build_fan_gate_plate_geometry(cfg)
     assert g.gates and g.volume_cm3() > 0
     # the gate keeps its shape: axis → gate end is gate_len regardless of the tab
@@ -455,14 +472,19 @@ def test_old_gate_ramp_may_start_exactly_at_the_well_top() -> None:
 
 def _balancer_cells(cfg, g):
     """Analytic ▽ membership on the cell centres: base on the gate end line,
-    apex ``balancer_h`` toward the sprue, half-width linear apex → base."""
+    apex ``balancer_h`` toward the sprue, half-width linear apex → base.
+    The well disc is excluded: the builder paints the well pocket after the
+    balancer, so at the maximum height (apex on the well top) the tangent
+    cell belongs to the well, not the cut."""
     yy, xx = _grid_mm(g)
     y_apex = cfg.y_gate_end_mm - cfg.balancer_h_mm
     t = np.clip((yy - y_apex) / cfg.balancer_h_mm, 0.0, 1.0)
+    r2 = (xx - cfg.axis_x_mm) ** 2 + (yy - cfg.y_axis_mm) ** 2
     inside = (
         (yy >= y_apex)
         & (yy <= cfg.y_gate_end_mm)
         & (np.abs(xx - cfg.axis_x_mm) <= 0.5 * cfg.balancer_w_mm * t)
+        & (r2 > (cfg.well_d_mm / 2.0) ** 2)
     )
     return inside & g.mask
 
@@ -476,14 +498,9 @@ def test_balancer_is_off_by_default_and_leaves_the_geometry_unchanged() -> None:
 
 @pytest.mark.parametrize("gate_type,w", [("fan", 100.0), ("old", 30.0)])
 def test_balancer_is_an_inverted_triangle_with_its_base_on_the_gate_end(gate_type, w) -> None:
-    # 0.5 mm grid: with well φ23 the gate end line lies on mm-grid cell
-    # centres, which would inflate the ▽'s base row by half a cell and push
-    # the area ≈ w·h/2 check past its tolerance
-    cfg = _cfg(
-        gate_type=gate_type, balancer_on=True, balancer_w_mm=w, balancer_h_mm=20.0, cell_size_mm=0.5
-    )
+    cfg = _cfg(gate_type=gate_type, balancer_on=True, balancer_w_mm=w, balancer_h_mm=20.0)
     g = build_fan_gate_plate_geometry(cfg)
-    g0 = build_fan_gate_plate_geometry(_cfg(gate_type=gate_type, cell_size_mm=0.5))
+    g0 = build_fan_gate_plate_geometry(_cfg(gate_type=gate_type))
     yy, xx = _grid_mm(g)
     ax = np.abs(xx - cfg.axis_x_mm)
     inside = _balancer_cells(cfg, g)
@@ -709,7 +726,7 @@ def test_wing_gate_matches_the_drawing_at_probe_points() -> None:
     # core: t2.0 flat land, then the 1→15 taper, then t4.0 body
     land = below & (dd < cfg.wing_land_len_mm) & (ax < 13.0)
     assert land.any() and np.all(g.thickness_mm[land] == cfg.wing_land_thk_mm)
-    mid = below & (dd > 7.5) & (dd < 8.5) & (ax < 10.0)  # halfway up the taper
+    mid = below & (dd > 7.0) & (dd < 9.0) & (ax < 10.0)  # around the taper midpoint
     assert mid.any()
     assert np.all(np.abs(g.thickness_mm[mid] - 3.0) < 0.2)
     body = below & (dd > 16.0) & (dd < 27.0) & (ax < 10.0)
@@ -746,12 +763,15 @@ def test_wing_land_is_the_drawing_220_wide_and_symmetric() -> None:
     g = build_fan_gate_plate_geometry(cfg)
     yy, xx = _grid_mm(g)
     dx = g.cell_size_mm
-    # the gate-end row itself (φ23 puts it exactly on a cell centre)
+    # the land is 30 + 2×95 = 220 on the gate end line itself …
+    assert cfg.wing_center_w_mm + 2 * cfg.wing_w_mm == pytest.approx(220.0)
+    # … and the last gate row (half a cell below it) follows the outer slant
     first = g.mask & (yy <= cfg.y_gate_end_mm) & (yy > cfg.y_gate_end_mm - dx)
+    assert first.any()
+    _, outer_wing, _ = _wing_lines_mm(cfg)
+    d_row = float((cfg.y_gate_end_mm - yy)[first][0])
     xs = xx[first]
-    assert xs.max() - xs.min() + dx == pytest.approx(
-        cfg.wing_center_w_mm + 2 * cfg.wing_w_mm, abs=2 * dx
-    )
+    assert xs.max() - xs.min() + dx == pytest.approx(2 * outer_wing(d_row), abs=2 * dx)
     off = np.sort(xx[g.mask & (yy <= cfg.y_gate_end_mm)] - cfg.axis_x_mm)
     assert np.allclose(off, -off[::-1])
 

@@ -8,8 +8,11 @@ the product like sim's film gate)::
     y_edge        = y_gate_end + tab_len (0 if no tab)   product long edge (display y = 0)
     y_flat_start  = y_edge - tab_flat_len               tab: flat 1.0 next to the edge
     y_gate_end    = y_axis + gate_len                   gate end = compression-zone boundary
-    y_axis        = pad + well_d / 2                    sprue axis = well center
-    y = pad                                             half-circle bottom
+    y_axis        = pad + grid_shift + well_d / 2       sprue axis = well center
+    y = pad + grid_shift                                half-circle bottom
+
+``grid_shift`` (< one cell, see ``grid_shift_mm``) pads the bottom so the
+product edge sits on a cell edge at the chosen resolution.
 
 Two gate shapes (``gate_type``), same axis position and ``gate_len``:
 
@@ -363,8 +366,26 @@ class FanGatePlateConfig:
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
+    def grid_shift_mm(self) -> float:
+        """Bottom-pad extension (< one cell) aligning the product edge to the
+        cell grid.
+
+        ``well_d / 2`` can land every y-level (gate end, product edge, frame
+        border) exactly on cell centres — φ23 on the default 1 mm grid does —
+        and a binary boundary assignment then renders the plate half a cell
+        off: the product origin and one whole frame/inner row moved with an
+        unrelated well-diameter change (Codex P2 on PR #11). Lifting the
+        whole geometry by ``(−y_edge) mod cell`` puts the product edge (and,
+        for the default mm-multiple lengths, every other level) back on a
+        cell edge, so the rendered plate is independent of ``well_d`` at any
+        resolution."""
+        y_edge_raw = self.pad_mm + self.well_d_mm / 2.0 + self.gate_len_mm + self.tab_len_eff_mm
+        shift = (-y_edge_raw) % self.cell_size_mm
+        return 0.0 if shift > self.cell_size_mm - 1e-9 else shift
+
+    @property
     def y_axis_mm(self) -> float:
-        return self.pad_mm + self.well_d_mm / 2.0
+        return self.pad_mm + self.grid_shift_mm + self.well_d_mm / 2.0
 
     @property
     def y_gate_end_mm(self) -> float:
@@ -404,7 +425,7 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     r_well = cfg.well_d_mm / 2.0
 
     total_w = 2 * pad + cfg.plate_w_mm
-    total_h = pad + r_well + cfg.gate_len_mm + cfg.tab_len_eff_mm + cfg.plate_h_mm + pad
+    total_h = cfg.y_plate_top_mm + pad  # includes grid_shift_mm in the bottom pad
     nx = int(round(total_w / dx))
     ny = int(round(total_h / dx))
 

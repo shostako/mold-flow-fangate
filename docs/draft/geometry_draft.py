@@ -1,4 +1,5 @@
-"""Draft sketch of the fan-gate plate geometry (spec as of 2026-08-27, after photo review).
+"""Draft sketch of the fan-gate plate geometry (spec as of 2026-08-27, after
+photo review; well φ23 since the 2026-09-08 rework).
 
 Shown: fan gate with the tab. The builder also does the old tab gate and no-tab
 variants; see docs/gate_variants_thickness.png for the rasterised four."""
@@ -16,7 +17,7 @@ FRAME, T_FRAME, T_INNER = 15.0, 1.0, 4.0
 LAND_L = 10.0                # tab (full-width land) length, product edge -> gate end; toggle
 FAN_L = 40.0                 # gate length: sprue axis -> gate end (= compression-zone boundary)
 GATE_OFF = LAND_L + FAN_L    # sprue axis distance from product long edge (derived; 40 without the tab)
-WELL_D, WELL_DEPTH = 20.0, 3.0
+WELL_D, WELL_DEPTH = 23.0, 3.0
 FAN_W = 250.0                # fan width where it joins the land band
 LAND_W = PW                  # land band spans the full product long edge (linked to PW)
 LAND_FLAT_L, T_LAND_FLAT = 2.0, 1.0   # flat part next to product edge
