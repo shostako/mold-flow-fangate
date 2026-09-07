@@ -396,7 +396,12 @@ def _fan_gate_sidebar() -> dict:
                 v["fan_thk_well_mm"] = None
     elif v["gate_type"] == "old":
         with st.expander("旧ゲート（タブゲート）", expanded=False):
-            num("old_gate_w_mm", "ゲート幅 [mm]", 1.0, 600.0, 1.0, fmt="%.1f")
+            st.caption(
+                "フランクはゲート端の幅から井戸に接するまで直線で絞る（ウイングコアと同じ）。"
+            )
+            num(
+                "old_gate_w_mm", "ゲート幅（ゲート端、井戸径以上）[mm]", 1.0, 600.0, 1.0, fmt="%.1f"
+            )
             num("old_gate_thk_mm", "ゲート肉厚（井戸側、井戸円ごと）[mm]", 0.1, 10.0, 0.05)
             num("old_gate_ramp_len_mm", "ゲート端手前の傾斜長 [mm]", 0.0, 300.0, 1.0, fmt="%.1f")
             num("old_gate_end_thk_mm", "ゲート端の厚み（タブ接続）[mm]", 0.1, 10.0, 0.05)
@@ -404,7 +409,7 @@ def _fan_gate_sidebar() -> dict:
         with st.expander("ウイングゲート", expanded=False):
             st.caption(
                 "中央の旧ゲートコア（井戸へ絞る）＋左右の薄肉ウイングランド＋両脇の三角形。"
-                "図面の実機は井戸 φ23（下の「井戸・コールドスラッグ・スプルー」で設定）。"
+                "井戸は既定で図面の実機どおり φ23（下の「井戸・コールドスラッグ・スプルー」で変更可）。"
             )
             num(
                 "wing_center_w_mm",

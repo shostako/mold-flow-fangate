@@ -8,8 +8,11 @@ the product like sim's film gate)::
     y_edge        = y_gate_end + tab_len (0 if no tab)   product long edge (display y = 0)
     y_flat_start  = y_edge - tab_flat_len               tab: flat 1.0 next to the edge
     y_gate_end    = y_axis + gate_len                   gate end = compression-zone boundary
-    y_axis        = pad + well_d / 2                    sprue axis = well center
-    y = pad                                             half-circle bottom
+    y_axis        = pad + grid_shift + well_d / 2       sprue axis = well center
+    y = pad + grid_shift                                half-circle bottom
+
+``grid_shift`` (< one cell, see ``grid_shift_mm``) pads the bottom so the
+product edge sits on a cell edge at the chosen resolution.
 
 Two gate shapes (``gate_type``), same axis position and ``gate_len``:
 
@@ -17,10 +20,12 @@ Two gate shapes (``gate_type``), same axis position and ``gate_len``:
   on the axis line and whose long edge is ``fan_w`` at ``y_gate_end``.
   ``fan_thk`` uniform, or a linear taper ``fan_thk_well → fan_thk`` from the
   axis line to the long edge when ``fan_thk_well`` is set.
-- ``"old"`` (the original tab gate): full well disc ∪ rectangle ``old_gate_w``
-  wide from the axis line to ``y_gate_end``. ``old_gate_thk`` (4.0) from the
-  well up to ``old_gate_ramp_len`` before the gate end, then a linear ramp
-  down to ``old_gate_end_thk`` (2.0) at the gate end.
+- ``"old"`` (the original tab gate): full well disc ∪ a converging trapezoid,
+  ``old_gate_w`` wide at ``y_gate_end``, flanks narrowing linearly to touch
+  the well ``well_d`` on the axis line (2026-09-08: same silhouette rule as
+  the wing core; it was a plain rectangle before). ``old_gate_thk`` (4.0)
+  from the well up to ``old_gate_ramp_len`` before the gate end, then a
+  linear ramp down to ``old_gate_end_thk`` (2.0) at the gate end.
 - ``"wing"`` (the old gate's successor, 2026-09 sketch): three parts, all
   measured by the depth ``d`` below the gate end line.
 
@@ -60,7 +65,7 @@ painted after the gate thickness, before the well / slug), and ``validate``
 requires ``balancer_thk`` below the gate thickness on the gate end line
 (where the base sits), so the ▽ is a real cut at least along its base. Intersected with the gate body as a guard; under ``validate``
 (base ≤ gate width on the gate end line, apex above the well) the ▽ lies
-inside the trapezoid / rectangle anyway, since both half-widths are linear
+inside the fan / old-gate trapezoid anyway, since both half-widths are linear
 in y and the gate's is ≥ the ▽'s at both ends. Not part of the compression
 zone.
 
@@ -114,7 +119,8 @@ class FanGatePlateConfig:
     fan_w_mm: float = 250.0
     fan_thk_mm: float = 2.0  # at the gate end (uniform when fan_thk_well_mm is None)
     fan_thk_well_mm: float | None = None  # at the axis line; enables a linear taper
-    # old tab gate: rectangle old_gate_w wide, old_gate_thk from the well up to
+    # old tab gate: converging trapezoid, old_gate_w at the gate end narrowing
+    # to well_d on the axis line; old_gate_thk from the well up to
     # old_gate_ramp_len before the gate end, then a ramp down to old_gate_end_thk
     old_gate_w_mm: float = 30.0
     old_gate_thk_mm: float = 4.0
@@ -138,8 +144,9 @@ class FanGatePlateConfig:
     balancer_w_mm: float = 100.0  # base width on the gate end line
     balancer_h_mm: float = 20.0  # gate end → apex
     balancer_thk_mm: float = 1.0  # thickness inside the triangle
-    # well (pocket at the sprue foot) and cold slug
-    well_d_mm: float = 20.0
+    # well (pocket at the sprue foot) and cold slug. φ23 is the mold's current
+    # state (the 2026-09 wing-gate drawing); it was φ20 before that rework
+    well_d_mm: float = 23.0
     well_depth_mm: float = 3.0
     slug_d_mm: float = 6.0
     slug_depth_mm: float = 5.0
@@ -225,10 +232,10 @@ class FanGatePlateConfig:
                 raise ValueError(
                     f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
                 )
-            if self.cell_size_mm > self.old_gate_w_mm + eps:
+            if self.old_gate_w_mm < self.well_d_mm - eps:
                 raise ValueError(
-                    f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
-                    f"a mesh coarser than the gate body leaves the well disconnected"
+                    f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≥ well_d_mm "
+                    f"({self.well_d_mm}); the gate converges toward the well"
                 )
         else:  # wing
             for name, val in (
@@ -359,8 +366,26 @@ class FanGatePlateConfig:
 
     # ----- derived y-levels (grid frame, mm) -----
     @property
+    def grid_shift_mm(self) -> float:
+        """Bottom-pad extension (< one cell) aligning the product edge to the
+        cell grid.
+
+        ``well_d / 2`` can land every y-level (gate end, product edge, frame
+        border) exactly on cell centres — φ23 on the default 1 mm grid does —
+        and a binary boundary assignment then renders the plate half a cell
+        off: the product origin and one whole frame/inner row moved with an
+        unrelated well-diameter change (Codex P2 on PR #11). Lifting the
+        whole geometry by ``(−y_edge) mod cell`` puts the product edge (and,
+        for the default mm-multiple lengths, every other level) back on a
+        cell edge, so the rendered plate is independent of ``well_d`` at any
+        resolution."""
+        y_edge_raw = self.pad_mm + self.well_d_mm / 2.0 + self.gate_len_mm + self.tab_len_eff_mm
+        shift = (-y_edge_raw) % self.cell_size_mm
+        return 0.0 if shift > self.cell_size_mm - 1e-9 else shift
+
+    @property
     def y_axis_mm(self) -> float:
-        return self.pad_mm + self.well_d_mm / 2.0
+        return self.pad_mm + self.grid_shift_mm + self.well_d_mm / 2.0
 
     @property
     def y_gate_end_mm(self) -> float:
@@ -400,7 +425,7 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     r_well = cfg.well_d_mm / 2.0
 
     total_w = 2 * pad + cfg.plate_w_mm
-    total_h = pad + r_well + cfg.gate_len_mm + cfg.tab_len_eff_mm + cfg.plate_h_mm + pad
+    total_h = cfg.y_plate_top_mm + pad  # includes grid_shift_mm in the bottom pad
     nx = int(round(total_w / dx))
     ny = int(round(total_h / dx))
 
@@ -419,7 +444,10 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_w_at_y)
         in_gate = in_gate_body | (in_well & (yy <= y_axis))
     elif cfg.gate_type == "old":
-        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= cfg.old_gate_w_mm / 2.0)
+        # converging trapezoid: old_gate_w at the gate end → well_d on the axis
+        # line (2026-09-08 rework, same rule as the wing core)
+        half_old = 0.5 * (cfg.well_d_mm + (cfg.old_gate_w_mm - cfg.well_d_mm) * t_gate)
+        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_old)
         in_gate = in_gate_body | in_well
     else:  # wing: core (converging to the well) + wing lands + side triangles
         half_land = 0.5 * cfg.wing_center_w_mm

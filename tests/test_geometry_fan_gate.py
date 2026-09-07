@@ -67,7 +67,11 @@ def test_thickness_is_zero_outside_mask() -> None:
 
 
 def test_product_volume_matches_the_analytic_frame_plate() -> None:
+    # exact at the default 1 mm grid: grid_shift_mm keeps the product edge and
+    # the frame/inner boundary on cell edges even with the φ23 well (whose
+    # half-radius would otherwise put them on cell centres, Codex P2 on PR #11)
     cfg = _cfg()
+    assert cfg.grid_shift_mm == pytest.approx(0.5)
     g = build_fan_gate_plate_geometry(cfg)
     inner_w = cfg.plate_w_mm - 2 * cfg.frame_w_mm
     inner_h = cfg.plate_h_mm - 2 * cfg.frame_w_mm
@@ -75,6 +79,23 @@ def test_product_volume_matches_the_analytic_frame_plate() -> None:
     expected = (frame_area * cfg.frame_thk_mm + inner_w * inner_h * cfg.inner_thk_mm) / 1000.0
     got = float(g.thickness_mm[g.product_mask].sum()) * g.cell_size_mm**2 / 1000.0
     assert got == pytest.approx(expected, rel=1e-6)
+
+
+def test_the_rendered_plate_is_independent_of_the_well_diameter() -> None:
+    """Codex P2 on PR #11: a half-integer well radius (φ23) put every y-level
+    on mm-grid cell centres and the rendered plate moved with the well —
+    origin off by half a cell, one frame/inner row misassigned.
+    ``grid_shift_mm`` must keep the plate raster identical instead."""
+    volumes, offsets = [], []
+    for wd in (20.0, 21.0, 23.0):  # shifts 0, 0.5, 0.5
+        cfg = _cfg(well_d_mm=wd)
+        g = build_fan_gate_plate_geometry(cfg)
+        volumes.append(float(g.thickness_mm[g.product_mask].sum()) * g.cell_size_mm**2)
+        _, y0 = g.display_origin_mm()
+        offsets.append(y0 - cfg.y_edge_mm)
+    assert volumes[0] == pytest.approx(volumes[1], rel=1e-12)
+    assert volumes[0] == pytest.approx(volumes[2], rel=1e-12)
+    assert offsets == [pytest.approx(0.0)] * 3
 
 
 # ------------------------------------------------------------- thickness
@@ -126,13 +147,16 @@ def test_land_band_spans_the_full_product_width() -> None:
     cfg = _cfg()
     g = build_fan_gate_plate_geometry(cfg)
     yy, xx = _grid_mm(g)
-    land_row = (yy > cfg.y_edge_mm - 1) & (yy < cfg.y_edge_mm)
+    # y_edge sits exactly on a cell centre (well φ23), so the band is closed
+    land_row = (yy > cfg.y_edge_mm - 1) & (yy <= cfg.y_edge_mm)
+    assert land_row.any()
     x_land = xx[land_row & g.mask]
     assert x_land.min() == pytest.approx(cfg.pad_mm + g.cell_size_mm / 2)
     assert x_land.max() == pytest.approx(cfg.pad_mm + cfg.plate_w_mm - g.cell_size_mm / 2)
     # the last fan row (just below the land) is the trapezoid's analytic
     # width at that row, not the land width
-    fan_row = (yy > cfg.y_gate_end_mm - g.cell_size_mm) & (yy < cfg.y_gate_end_mm)
+    fan_row = (yy > cfg.y_gate_end_mm - g.cell_size_mm) & (yy <= cfg.y_gate_end_mm)
+    assert fan_row.any()
     y_row = float(yy[fan_row][0])
     t = (y_row - cfg.y_axis_mm) / cfg.gate_len_mm
     w_expected = cfg.well_d_mm + (cfg.fan_w_mm - cfg.well_d_mm) * t
@@ -186,7 +210,7 @@ def test_compression_zone_is_product_plus_land_and_excludes_the_gate_block() -> 
     cm = g.compression_mask
     assert cm is not None and g.product_mask is not None
     assert np.all(cm[g.product_mask])
-    land = g.mask & (yy > cfg.y_gate_end_mm) & (yy < cfg.y_edge_mm)
+    land = g.mask & (yy > cfg.y_gate_end_mm) & (yy <= cfg.y_edge_mm)
     assert land.any() and np.all(cm[land])
     gate_block = g.mask & (yy < cfg.y_gate_end_mm)
     assert gate_block.any() and not cm[gate_block].any()
@@ -197,6 +221,9 @@ def test_compression_zone_is_product_plus_land_and_excludes_the_gate_block() -> 
 
 
 def test_display_origin_sits_on_the_product_edge_not_the_land() -> None:
+    # exact at the default grid thanks to grid_shift_mm (the φ23 well would
+    # otherwise put the product edge on a cell centre and the origin off by
+    # half a cell)
     cfg = _cfg()
     g = build_fan_gate_plate_geometry(cfg)
     x0, y0 = g.display_origin_mm()
@@ -308,8 +335,9 @@ def test_without_the_tab_the_product_edge_sits_on_the_gate_end() -> None:
     assert np.array_equal(g.compression_mask, g.product_mask)
     # the fan's last row meets the frame directly (2.0 → 1.0 step, no ramp)
     on_axis = np.abs(xx - cfg.axis_x_mm) < 1
-    last_fan = on_axis & (yy > cfg.y_gate_end_mm - 1) & (yy < cfg.y_gate_end_mm)
-    first_plate = on_axis & (yy > cfg.y_edge_mm) & (yy < cfg.y_edge_mm + 1)
+    last_fan = on_axis & (yy > cfg.y_gate_end_mm - 1) & (yy <= cfg.y_gate_end_mm)
+    first_plate = on_axis & (yy > cfg.y_edge_mm) & (yy <= cfg.y_edge_mm + 1)
+    assert last_fan.any() and first_plate.any()
     assert np.all(g.thickness_mm[last_fan] == cfg.fan_thk_mm)
     assert np.all(g.thickness_mm[first_plate] == cfg.frame_thk_mm)
     # the grid is shorter by the tab length
@@ -318,27 +346,28 @@ def test_without_the_tab_the_product_edge_sits_on_the_gate_end() -> None:
     assert g_tab.volume_cm3() > g.volume_cm3()
 
 
-def test_old_gate_is_a_rectangle_with_a_full_well_disc_and_a_ramp_at_the_end() -> None:
+def test_old_gate_converges_to_the_well_with_a_full_disc_and_a_ramp_at_the_end() -> None:
     cfg = _cfg(gate_type="old")
     g = build_fan_gate_plate_geometry(cfg)
     assert g.label == "old_gate_plate"
     yy, xx = _grid_mm(g)
     ax = np.abs(xx - cfg.axis_x_mm)
-    # silhouette: rectangle old_gate_w wide from the axis line to the gate end
+    # silhouette (2026-09-08 rework): converging trapezoid, old_gate_w at the
+    # gate end narrowing linearly to well_d on the axis line
     body_rows = (yy > cfg.y_axis_mm + cfg.well_d_mm / 2 + 1) & (yy < cfg.y_gate_end_mm - 1)
+    assert body_rows.any()
     for y_row in np.unique(yy[body_rows])[::5]:
+        t = (y_row - cfg.y_axis_mm) / cfg.gate_len_mm
+        w_expected = cfg.well_d_mm + (cfg.old_gate_w_mm - cfg.well_d_mm) * t
         xs = xx[(yy == y_row) & g.mask]
         assert xs.max() - xs.min() + g.cell_size_mm == pytest.approx(
-            cfg.old_gate_w_mm, abs=2 * g.cell_size_mm
+            w_expected, abs=2 * g.cell_size_mm
         )
-    # nothing outside the rectangle below the gate end except the well disc
+    # nothing outside the trapezoid below the gate end except the well disc
     r = np.hypot(xx - cfg.axis_x_mm, yy - cfg.y_axis_mm)
-    stray = (
-        g.mask
-        & (yy < cfg.y_gate_end_mm)
-        & (ax > cfg.old_gate_w_mm / 2 + 1)
-        & (r > cfg.well_d_mm / 2)
-    )
+    t_gate = np.clip((yy - cfg.y_axis_mm) / cfg.gate_len_mm, 0.0, 1.0)
+    half_old = 0.5 * (cfg.well_d_mm + (cfg.old_gate_w_mm - cfg.well_d_mm) * t_gate)
+    stray = g.mask & (yy < cfg.y_gate_end_mm) & (ax > half_old + 1) & (r > cfg.well_d_mm / 2)
     assert not stray.any()
     # the well disc is complete (its upper half is inside the body anyway)
     assert np.all(g.mask[r <= cfg.well_d_mm / 2 - 1])
@@ -359,7 +388,8 @@ def test_old_gate_is_a_rectangle_with_a_full_well_disc_and_a_ramp_at_the_end() -
     slug = g.mask & (r <= cfg.slug_d_mm / 2 - 0.5)
     assert np.all(g.thickness_mm[slug] == cfg.well_depth_mm + cfg.slug_depth_mm)
     # the tab connects at old_gate_end_thk (= tab_end_thk by default): continuous
-    first_tab = on_axis & (yy > cfg.y_gate_end_mm) & (yy < cfg.y_gate_end_mm + 1)
+    first_tab = on_axis & (yy > cfg.y_gate_end_mm) & (yy <= cfg.y_gate_end_mm + 1)
+    assert first_tab.any()
     assert np.all(np.abs(g.thickness_mm[first_tab] - cfg.tab_end_thk_mm) < 0.2)
 
 
@@ -393,7 +423,8 @@ def test_old_gate_fills_from_the_sprue_outward_too() -> None:
         dict(gate_type="old", old_gate_ramp_len_mm=50.0),  # ramp longer than the gate
         dict(
             gate_type="old", old_gate_ramp_len_mm=31.0
-        ),  # ramp starts inside the well disc (40 - 31 < 10)
+        ),  # ramp starts inside the well disc (40 - 31 < 11.5)
+        dict(gate_type="old", old_gate_w_mm=20.0),  # narrower than the φ23 well
         dict(
             gate_type="old", gate_len_mm=8.0, old_gate_ramp_len_mm=0.0
         ),  # disc top beyond the gate end
@@ -427,7 +458,7 @@ def test_fan_limits_are_not_enforced_on_the_old_gate() -> None:
 def test_old_gate_ramp_may_start_exactly_at_the_well_top() -> None:
     """Codex P2 on PR #7: the boundary case gate_len = ramp + well radius is legal
     and keeps the whole well at old_gate_thk."""
-    cfg = _cfg(gate_type="old", gate_len_mm=25.0, old_gate_ramp_len_mm=15.0)
+    cfg = _cfg(gate_type="old", gate_len_mm=26.5, old_gate_ramp_len_mm=15.0)  # 15 + 23/2
     g = build_fan_gate_plate_geometry(cfg)
     yy, xx = _grid_mm(g)
     r = np.hypot(xx - cfg.axis_x_mm, yy - cfg.y_axis_mm)
@@ -441,14 +472,19 @@ def test_old_gate_ramp_may_start_exactly_at_the_well_top() -> None:
 
 def _balancer_cells(cfg, g):
     """Analytic ▽ membership on the cell centres: base on the gate end line,
-    apex ``balancer_h`` toward the sprue, half-width linear apex → base."""
+    apex ``balancer_h`` toward the sprue, half-width linear apex → base.
+    The well disc is excluded: the builder paints the well pocket after the
+    balancer, so at the maximum height (apex on the well top) the tangent
+    cell belongs to the well, not the cut."""
     yy, xx = _grid_mm(g)
     y_apex = cfg.y_gate_end_mm - cfg.balancer_h_mm
     t = np.clip((yy - y_apex) / cfg.balancer_h_mm, 0.0, 1.0)
+    r2 = (xx - cfg.axis_x_mm) ** 2 + (yy - cfg.y_axis_mm) ** 2
     inside = (
         (yy >= y_apex)
         & (yy <= cfg.y_gate_end_mm)
         & (np.abs(xx - cfg.axis_x_mm) <= 0.5 * cfg.balancer_w_mm * t)
+        & (r2 > (cfg.well_d_mm / 2.0) ** 2)
     )
     return inside & g.mask
 
@@ -476,8 +512,9 @@ def test_balancer_is_an_inverted_triangle_with_its_base_on_the_gate_end(gate_typ
     # base row: the last gate row is thinned over the full base width and
     # the first tab row above it is not (the triangle touches the land)
     dx = g.cell_size_mm
-    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy < cfg.y_gate_end_mm)
-    first_tab = g.mask & (yy > cfg.y_gate_end_mm) & (yy < cfg.y_gate_end_mm + dx)
+    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy <= cfg.y_gate_end_mm)
+    first_tab = g.mask & (yy > cfg.y_gate_end_mm) & (yy <= cfg.y_gate_end_mm + dx)
+    assert last_gate.any() and first_tab.any()
     assert np.all(g.thickness_mm[last_gate & (ax < w / 2 - dx)] == cfg.balancer_thk_mm)
     assert np.all(g.thickness_mm[last_gate & (ax > w / 2 + dx)] != cfg.balancer_thk_mm)
     assert np.all(g.thickness_mm[first_tab] == g0.thickness_mm[first_tab])
@@ -501,7 +538,7 @@ def test_balancer_is_an_inverted_triangle_with_its_base_on_the_gate_end(gate_typ
 
 
 def test_balancer_is_not_compressed_and_does_not_reach_the_well() -> None:
-    cfg = _cfg(balancer_on=True, balancer_h_mm=30.0)
+    cfg = _cfg(balancer_on=True, balancer_h_mm=28.5)  # 40 − 23/2
     assert cfg.balancer_h_mm == cfg.gate_len_mm - cfg.well_d_mm / 2  # the legal maximum
     g = build_fan_gate_plate_geometry(cfg)
     inside = _balancer_cells(cfg, g)
@@ -517,7 +554,7 @@ def test_balancer_at_its_bounds_stays_inside_the_gate_body() -> None:
     # base = fan width, height = the legal maximum: the ▽ touches the fan's
     # slanted edges at the gate end and the well top at the apex, and every
     # thinned cell is a gate cell (the in_gate_body guard has nothing to clip)
-    cfg = _cfg(balancer_on=True, balancer_w_mm=250.0, balancer_h_mm=30.0)
+    cfg = _cfg(balancer_on=True, balancer_w_mm=250.0, balancer_h_mm=28.5)
     g = build_fan_gate_plate_geometry(cfg)
     g0 = build_fan_gate_plate_geometry(_cfg())
     assert np.array_equal(g.mask, g0.mask)
@@ -542,7 +579,7 @@ def test_balancer_solves() -> None:
     [
         dict(balancer_on=True, balancer_w_mm=260.0),  # wider than the fan
         dict(balancer_on=True, gate_type="old", balancer_w_mm=31.0),  # wider than the old gate
-        dict(balancer_on=True, balancer_h_mm=31.0),  # apex inside the well (40 − 10 = 30)
+        dict(balancer_on=True, balancer_h_mm=29.0),  # apex inside the well (40 − 11.5 = 28.5)
         dict(balancer_on=True, balancer_thk_mm=0.0),
         dict(balancer_on=True, balancer_thk_mm=2.0),  # = fan thickness: no cut anywhere
         dict(balancer_on=True, balancer_thk_mm=10.0),  # thicker than the fan (Codex P1 on PR #9)
@@ -575,7 +612,7 @@ def test_balancer_never_adds_material_where_the_gate_is_already_thinner() -> Non
     cfg = _cfg(
         balancer_on=True,
         balancer_thk_mm=1.5,
-        balancer_h_mm=30.0,
+        balancer_h_mm=28.5,
         fan_thk_well_mm=1.0,
         fan_thk_mm=2.0,
     )
@@ -608,8 +645,9 @@ def test_old_gate_without_a_ramp_lets_the_balancer_cut_from_the_full_gate_thickn
     g = build_fan_gate_plate_geometry(cfg)
     yy, xx = _grid_mm(g)
     dx = g.cell_size_mm
-    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy < cfg.y_gate_end_mm)
+    last_gate = g.mask & (yy > cfg.y_gate_end_mm - dx) & (yy <= cfg.y_gate_end_mm)
     on_axis = np.abs(xx - cfg.axis_x_mm) < dx
+    assert (last_gate & on_axis).any()
     assert np.all(g.thickness_mm[last_gate & on_axis] == 3.0)
     # and 4.0 (≥ the gate thickness there) is rejected as no cut at all
     with pytest.raises(ValueError):
@@ -688,7 +726,7 @@ def test_wing_gate_matches_the_drawing_at_probe_points() -> None:
     # core: t2.0 flat land, then the 1→15 taper, then t4.0 body
     land = below & (dd < cfg.wing_land_len_mm) & (ax < 13.0)
     assert land.any() and np.all(g.thickness_mm[land] == cfg.wing_land_thk_mm)
-    mid = below & (dd > 7.5) & (dd < 8.5) & (ax < 10.0)  # halfway up the taper
+    mid = below & (dd > 7.0) & (dd < 9.0) & (ax < 10.0)  # around the taper midpoint
     assert mid.any()
     assert np.all(np.abs(g.thickness_mm[mid] - 3.0) < 0.2)
     body = below & (dd > 16.0) & (dd < 27.0) & (ax < 10.0)
@@ -725,12 +763,15 @@ def test_wing_land_is_the_drawing_220_wide_and_symmetric() -> None:
     g = build_fan_gate_plate_geometry(cfg)
     yy, xx = _grid_mm(g)
     dx = g.cell_size_mm
-    # the gate-end row itself (φ23 puts it exactly on a cell centre)
+    # the land is 30 + 2×95 = 220 on the gate end line itself …
+    assert cfg.wing_center_w_mm + 2 * cfg.wing_w_mm == pytest.approx(220.0)
+    # … and the last gate row (half a cell below it) follows the outer slant
     first = g.mask & (yy <= cfg.y_gate_end_mm) & (yy > cfg.y_gate_end_mm - dx)
+    assert first.any()
+    _, outer_wing, _ = _wing_lines_mm(cfg)
+    d_row = float((cfg.y_gate_end_mm - yy)[first][0])
     xs = xx[first]
-    assert xs.max() - xs.min() + dx == pytest.approx(
-        cfg.wing_center_w_mm + 2 * cfg.wing_w_mm, abs=2 * dx
-    )
+    assert xs.max() - xs.min() + dx == pytest.approx(2 * outer_wing(d_row), abs=2 * dx)
     off = np.sort(xx[g.mask & (yy <= cfg.y_gate_end_mm)] - cfg.axis_x_mm)
     assert np.allclose(off, -off[::-1])
 
