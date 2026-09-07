@@ -566,6 +566,9 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         compression_mask=(in_plate | in_tab) & mask,
         product_mask=in_plate & mask,
         valve_axis_x_mm=cx,
+        # nominal injection orifice = the sprue foot disc; the gate marker
+        # draws this one true-scale circle (sim v0.38.1)
+        valve_marker_mm=(float(cx), float(y_axis), cfg.sprue_bottom_d_mm / 2.0),
     )
 
     # --- injection point: sprue foot disc at the axis ---
@@ -579,6 +582,9 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         d2 = np.where(mask, r2_axis, np.inf)
         ic_y, ic_x = np.unravel_index(int(np.argmin(d2)), d2.shape)
         geom.gates.append((int(ic_y), int(ic_x)))
+        # the snapped cell is where the solver actually injects; drawing the
+        # nominal disc there would lie about the injection point
+        geom.valve_marker_mm = None
     else:
         for iy, ix in zip(gate_iys, gate_ixs, strict=True):
             geom.gates.append((int(iy), int(ix)))
