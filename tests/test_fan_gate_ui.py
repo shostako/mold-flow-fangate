@@ -198,3 +198,63 @@ def test_a_gate_too_short_for_a_balancer_warns_instead_of_an_unfixable_error():
     at.number_input(key="fg_gate_len_mm").set_value(40.0).run()
     assert "fg_balancer_h_mm" in {n.key for n in at.number_input}
     assert "肉盗みを置けない" not in _texts(at)
+
+
+def test_the_wing_gate_radio_shows_its_widgets_and_drops_the_balancer():
+    at = _app()
+    v_fan = at.session_state["mfs_shot_volume_auto"]
+    # a balancer left on under the fan must not veto the wing gate: validate()
+    # rejects the combination, so the sidebar forces it off instead
+    at.checkbox(key="fg_balancer_on").set_value(True).run()
+    at.radio(key="fg_gate_label").set_value("ウイングゲート").run()
+    assert not at.exception
+    assert "形状パラメータが不正" not in _texts(at)
+    keys = {n.key for n in at.number_input}
+    assert {
+        "fg_wing_center_w_mm",
+        "fg_wing_w_mm",
+        "fg_wing_thk_mm",
+        "fg_wing_depth_mm",
+        "fg_wing_tri_thk_mm",
+        "fg_wing_body_thk_mm",
+    } <= keys
+    assert "fg_fan_w_mm" not in keys and "fg_old_gate_w_mm" not in keys
+    # the balancer expander is gone entirely, checkbox included
+    assert "fg_balancer_on" not in {c.key for c in at.checkbox}
+    assert "fg_balancer_w_mm" not in keys
+    # the thin wings hold much less melt than the 250-wide t2.0 fan
+    v_wing = at.session_state["mfs_shot_volume_auto"]
+    assert v_wing < v_fan
+    at.number_input(key="fg_well_d_mm").set_value(23.0).run()
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    cfg = at.session_state["mfs_settings"]["geometry"]["config"]
+    d = FanGatePlateConfig()
+    assert cfg["gate_type"] == "wing"
+    assert cfg["balancer_on"] is False
+    assert cfg["well_d_mm"] == 23.0
+    assert cfg["wing_center_w_mm"] == d.wing_center_w_mm
+    assert cfg["wing_tri_w_mm"] == d.wing_tri_w_mm  # fixed field rides along
+    assert at.session_state["mfs_geom"].label == "wing_gate_plate"
+
+
+def test_the_wing_widths_are_independent_inputs():
+    at = _app()
+    at.radio(key="fg_gate_label").set_value("ウイングゲート").run()
+    assert not at.exception
+    v_full = at.session_state["mfs_shot_volume_auto"]
+    # narrower wings, same core
+    at.number_input(key="fg_wing_w_mm").set_value(50.0).run()
+    assert not at.exception
+    assert at.number_input(key="fg_wing_center_w_mm").value == 30.0
+    assert at.session_state["mfs_shot_volume_auto"] < v_full
+    # wider core, wings stay where the user put them
+    at.number_input(key="fg_wing_center_w_mm").set_value(40.0).run()
+    assert not at.exception
+    assert at.number_input(key="fg_wing_w_mm").value == 50.0
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.button[0].click().run()
+    assert not at.exception
+    cfg = at.session_state["mfs_settings"]["geometry"]["config"]
+    assert cfg["wing_center_w_mm"] == 40.0 and cfg["wing_w_mm"] == 50.0

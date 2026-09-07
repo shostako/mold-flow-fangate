@@ -270,7 +270,7 @@ def test_validation_rejects_bad_configs(overrides) -> None:
 # ------------------------------------------------- gate type × tab toggle
 
 
-@pytest.mark.parametrize("gate_type", ["fan", "old"])
+@pytest.mark.parametrize("gate_type", ["fan", "old", "wing"])
 @pytest.mark.parametrize("tab_on", [True, False])
 def test_every_gate_tab_combination_builds_with_the_same_axis_and_gate_end(
     gate_type, tab_on
@@ -640,3 +640,197 @@ def test_balancer_limits_are_exactly_what_validate_enforces(overrides) -> None:
     ):
         with pytest.raises(ValueError):
             build_fan_gate_plate_geometry(_cfg(**{**ok, **bad}))
+
+
+# ------------------------------------------------------------ wing gate
+
+
+def _wcfg(**overrides) -> FanGatePlateConfig:
+    """Wing-gate config with the 2026-09 drawing's well (φ23)."""
+    overrides.setdefault("well_d_mm", 23.0)
+    return _cfg(gate_type="wing", **overrides)
+
+
+def _wing_lines_mm(cfg):
+    """The drawing's construction lines as functions of the depth ``d`` below
+    the gate end: core flank, wing outer slant, triangle hypotenuse."""
+
+    def half_core(d):
+        return 0.5 * cfg.wing_center_w_mm - 0.5 * (cfg.wing_center_w_mm - cfg.well_d_mm) * (
+            d / cfg.gate_len_mm
+        )
+
+    def outer_wing(d):
+        return (
+            0.5 * cfg.wing_center_w_mm
+            + cfg.wing_w_mm
+            - (cfg.wing_w_mm - cfg.wing_tri_w_mm) * d / cfg.wing_depth_mm
+        )
+
+    def outer_tri(d):
+        top = 0.5 * cfg.wing_center_w_mm + cfg.wing_tri_w_mm
+        return top + (half_core(cfg.gate_len_mm) - top) * (d - cfg.wing_depth_mm) / (
+            cfg.gate_len_mm - cfg.wing_depth_mm
+        )
+
+    return half_core, outer_wing, outer_tri
+
+
+def test_wing_gate_matches_the_drawing_at_probe_points() -> None:
+    cfg = _wcfg()
+    g = build_fan_gate_plate_geometry(cfg)
+    assert g.label == "wing_gate_plate"
+    yy, xx = _grid_mm(g)
+    ax = np.abs(xx - cfg.axis_x_mm)
+    dd = cfg.y_gate_end_mm - yy
+    below = g.mask & (dd >= 0)
+    half_core, outer_wing, _ = _wing_lines_mm(cfg)
+    # core: t2.0 flat land, then the 1→15 taper, then t4.0 body
+    land = below & (dd < cfg.wing_land_len_mm) & (ax < 13.0)
+    assert land.any() and np.all(g.thickness_mm[land] == cfg.wing_land_thk_mm)
+    mid = below & (dd > 7.5) & (dd < 8.5) & (ax < 10.0)  # halfway up the taper
+    assert mid.any()
+    assert np.all(np.abs(g.thickness_mm[mid] - 3.0) < 0.2)
+    body = below & (dd > 16.0) & (dd < 27.0) & (ax < 10.0)
+    assert body.any() and np.all(g.thickness_mm[body] == cfg.wing_body_thk_mm)
+    # wings: t0.6 between the core flank and the outer slant
+    in_wing = (
+        below
+        & (dd > 2.0)
+        & (dd < cfg.wing_depth_mm - 1.0)
+        & (ax > half_core(dd) + 1.0)
+        & (ax < outer_wing(dd) - 1.0)
+    )
+    assert in_wing.sum() > 500
+    assert np.all(g.thickness_mm[in_wing] == cfg.wing_thk_mm)
+    # past the outer slant there is no steel cut at all (no material)
+    outside = (dd > 1.0) & (dd < cfg.wing_depth_mm) & (ax > outer_wing(dd) + 1.0)
+    assert outside.any() and not g.mask[outside].any()
+    # and nothing beyond the 220 land anywhere below the gate end
+    land_half = 0.5 * cfg.wing_center_w_mm + cfg.wing_w_mm
+    assert not g.mask[(dd >= 0) & (ax > land_half + 1.0)].any()
+    # well ring keeps the body thickness (4.0 > well_depth 3.0), slug is deeper
+    r = np.hypot(xx - cfg.axis_x_mm, yy - cfg.y_axis_mm)
+    ring = g.mask & (r >= cfg.slug_d_mm / 2 + 0.5) & (r <= cfg.well_d_mm / 2 - 0.5)
+    assert np.all(g.thickness_mm[ring] == cfg.wing_body_thk_mm)
+    slug = g.mask & (r <= cfg.slug_d_mm / 2 - 0.5)
+    assert np.all(g.thickness_mm[slug] == cfg.well_depth_mm + cfg.slug_depth_mm)
+    # below the axis line only the well disc remains
+    stray = g.mask & (yy < cfg.y_axis_mm) & (r > cfg.well_d_mm / 2)
+    assert not stray.any()
+
+
+def test_wing_land_is_the_drawing_220_wide_and_symmetric() -> None:
+    cfg = _wcfg()
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    dx = g.cell_size_mm
+    # the gate-end row itself (φ23 puts it exactly on a cell centre)
+    first = g.mask & (yy <= cfg.y_gate_end_mm) & (yy > cfg.y_gate_end_mm - dx)
+    xs = xx[first]
+    assert xs.max() - xs.min() + dx == pytest.approx(
+        cfg.wing_center_w_mm + 2 * cfg.wing_w_mm, abs=2 * dx
+    )
+    off = np.sort(xx[g.mask & (yy <= cfg.y_gate_end_mm)] - cfg.axis_x_mm)
+    assert np.allclose(off, -off[::-1])
+
+
+def test_wing_and_triangle_areas_match_the_drawing() -> None:
+    cfg = _wcfg()
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    dx = g.cell_size_mm
+    dd = cfg.y_gate_end_mm - yy
+    below = g.mask & (dd >= 0)
+    # wing trapezoid per side: every edge is straight, so the trapezoid rule
+    # over the two end widths is exact
+    half_core, outer_wing, outer_tri = _wing_lines_mm(cfg)
+    w0 = outer_wing(0.0) - half_core(0.0)
+    w1 = outer_wing(cfg.wing_depth_mm) - half_core(cfg.wing_depth_mm)
+    wing_area = 0.5 * (w0 + w1) * cfg.wing_depth_mm
+    wing_cells = below & (g.thickness_mm == cfg.wing_thk_mm)
+    got = wing_cells.sum() * dx**2
+    # rasterisation error scales with the perimeter: ~(95+85+17+25)·dx per side
+    assert got == pytest.approx(2 * wing_area, abs=240 * dx)
+    # side triangle per side: base (15+α, α from the converging flank) × height / 2
+    base = outer_tri(cfg.wing_depth_mm) - half_core(cfg.wing_depth_mm)
+    assert base > cfg.wing_tri_w_mm  # the +α of the drawing note
+    tri_area = base * (cfg.gate_len_mm - cfg.wing_depth_mm) / 2
+    tri_cells = (
+        below
+        & (dd > cfg.wing_depth_mm)
+        & (g.thickness_mm >= cfg.wing_thk_mm)
+        & (g.thickness_mm <= cfg.wing_tri_thk_mm)
+    )
+    got = tri_cells.sum() * dx**2
+    assert got == pytest.approx(2 * tri_area, abs=60 * dx)
+
+
+def test_wing_slope_climbs_from_wing_to_triangle_thickness() -> None:
+    cfg = _wcfg()
+    g = build_fan_gate_plate_geometry(cfg)
+    yy, xx = _grid_mm(g)
+    ax = np.abs(xx - cfg.axis_x_mm)
+    dd = cfg.y_gate_end_mm - yy
+    col = g.mask & (ax > 15.5) & (ax < 16.5) & (xx > cfg.axis_x_mm)
+    band = col & (dd > cfg.wing_depth_mm) & (dd < cfg.wing_depth_mm + cfg.wing_slope_mm)
+    assert band.any()
+    h = g.thickness_mm[band]
+    assert np.all((h > cfg.wing_thk_mm) & (h < cfg.wing_tri_thk_mm))
+    order = np.argsort(dd[band])
+    assert np.all(np.diff(h[order]) >= -1e-9)  # thicker toward the well
+    plateau = col & (dd > cfg.wing_depth_mm + cfg.wing_slope_mm + 1.0) & (dd < 34.0)
+    assert plateau.any() and np.all(g.thickness_mm[plateau] == cfg.wing_tri_thk_mm)
+
+
+def test_wing_gate_fills_from_the_sprue_outward_too() -> None:
+    cfg = _wcfg(cell_size_mm=2.0)
+    g = build_fan_gate_plate_geometry(cfg)
+    r = HeleShawSolver(
+        geometry=g, material=MaterialDB()["PP"], injection_volume_flow_cm3s=50.0
+    ).solve(num_frames=4)
+    ft = r.fill_time_s
+    assert np.isfinite(ft[g.mask]).all()
+    yy, xx = _grid_mm(g)
+    far_corner = g.mask & (yy > cfg.y_plate_top_mm - 3) & (xx < cfg.pad_mm + 3)
+    near_gate = g.mask & (np.abs(yy - cfg.y_axis_mm) < 2) & (np.abs(xx - cfg.axis_x_mm) < 2)
+    assert ft[far_corner].mean() > ft[near_gate].mean()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(wing_center_w_mm=20.0),  # narrower than the φ23 well
+        dict(wing_w_mm=150.0),  # 30 + 2·150 wider than the plate
+        dict(wing_tri_w_mm=100.0),  # triangle top wider than the wing
+        dict(wing_depth_mm=38.0),  # 38 + slope 5 past the axis line
+        dict(wing_slope_mm=20.0),  # 25 + 20 past the axis line
+        dict(wing_taper_len_mm=30.0),  # taper ends inside the well disc
+        dict(wing_land_len_mm=20.0),  # land longer than the taper
+        dict(wing_thk_mm=0.0),
+        dict(wing_land_len_mm=-1.0),
+        dict(balancer_on=True),  # the wing gate has no balancer
+    ],
+)
+def test_validation_rejects_bad_wing_configs(overrides) -> None:
+    with pytest.raises(ValueError):
+        build_fan_gate_plate_geometry(_wcfg(**overrides))
+
+
+def test_wing_boundary_cases_build() -> None:
+    # slope band ending exactly on the axis line, taper ending exactly on the
+    # well top, and the tab removed
+    assert build_fan_gate_plate_geometry(_wcfg(wing_depth_mm=35.0)).mask.any()
+    assert build_fan_gate_plate_geometry(_wcfg(wing_taper_len_mm=28.5)).mask.any()
+    assert build_fan_gate_plate_geometry(_wcfg(tab_on=False)).mask.any()
+
+
+def test_wing_limits_are_not_enforced_on_the_other_gates_and_vice_versa() -> None:
+    # hidden wing defaults must not veto fan/old plates …
+    assert build_fan_gate_plate_geometry(_cfg(gate_type="fan", wing_thk_mm=0.0)).mask.any()
+    assert build_fan_gate_plate_geometry(
+        _cfg(gate_type="old", wing_w_mm=500.0, plate_w_mm=120.0, plate_h_mm=80.0)
+    ).mask.any()
+    # … and hidden fan/old defaults must not veto the wing gate
+    g = build_fan_gate_plate_geometry(_wcfg(fan_w_mm=400.0, old_gate_ramp_len_mm=50.0))
+    assert g.mask.any() and g.gates

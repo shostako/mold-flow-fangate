@@ -21,6 +21,28 @@ Two gate shapes (``gate_type``), same axis position and ``gate_len``:
   wide from the axis line to ``y_gate_end``. ``old_gate_thk`` (4.0) from the
   well up to ``old_gate_ramp_len`` before the gate end, then a linear ramp
   down to ``old_gate_end_thk`` (2.0) at the gate end.
+- ``"wing"`` (the old gate's successor, 2026-09 sketch): three parts, all
+  measured by the depth ``d`` below the gate end line.
+
+  * **Core**: the old-gate groove, ``wing_center_w`` (30) wide on the gate
+    end line, flanks converging linearly to touch the well ``well_d`` (23)
+    on the axis line. Thickness ``wing_land_thk`` (2.0) on the flat land
+    ``d ≤ wing_land_len`` (1), a linear taper up to ``wing_body_thk`` (4.0)
+    at ``d = wing_taper_len`` (15), then constant to the well.
+  * **Wings**: thin lands ``wing_thk`` (0.6) hugging the core on both
+    sides, ``wing_w`` (95) per side on the gate end line (total land
+    = ``wing_center_w + 2·wing_w`` = 220). Trapezoids: the outer edge
+    slants from depth 0 at the outer tip to ``d = wing_depth`` (25) at
+    ``wing_center_w/2 + wing_tri_w`` (15+15=30) off axis.
+  * **Side triangles**: ``wing_tri_thk`` (2.0) between the core flank and
+    the hypotenuse from the wing's inner bottom corner down to the well
+    tangent on the axis line, ``wing_depth ≤ d ≤ gate_len``. The
+    ``wing_thk → wing_tri_thk`` step is blended over ``wing_slope`` (5)
+    into the triangle side; the step against the core flank is left sharp
+    (a machined groove edge).
+
+  The balancer is not supported for this type (the wing gate is itself a
+  flow-balance design; a ▽ on the 0.6 wings would be a no-op anyway).
 
 Tab (``tab_on``): the ``tab_len`` band between the gate end and the product
 edge, spanning the **full product width** (the mold calls it the tab gate
@@ -64,7 +86,7 @@ import numpy as np
 
 from .geometry import Geometry
 
-GATE_TYPES = ("fan", "old")
+GATE_TYPES = ("fan", "old", "wing")
 
 
 @dataclass(frozen=True)
@@ -98,6 +120,19 @@ class FanGatePlateConfig:
     old_gate_thk_mm: float = 4.0
     old_gate_ramp_len_mm: float = 15.0
     old_gate_end_thk_mm: float = 2.0
+    # wing gate: old-gate core (converging to the well) + thin wing lands +
+    # t2.0 side triangles; depths (d) are measured below the gate end line
+    wing_center_w_mm: float = 30.0  # core width on the gate end line
+    wing_w_mm: float = 95.0  # wing land width per side, on the gate end line
+    wing_thk_mm: float = 0.6  # wing land thickness
+    wing_depth_mm: float = 25.0  # gate end → wing bottom / triangle top edge
+    wing_tri_w_mm: float = 15.0  # triangle top edge beyond the core land edge
+    wing_tri_thk_mm: float = 2.0  # side triangle thickness
+    wing_slope_mm: float = 5.0  # wing → triangle thickness transition band
+    wing_land_len_mm: float = 1.0  # core: flat land below the gate end
+    wing_land_thk_mm: float = 2.0  # core: land thickness
+    wing_taper_len_mm: float = 15.0  # gate end → end of the land→body taper
+    wing_body_thk_mm: float = 4.0  # core: body thickness (taper end → well)
     # balancer: inverted triangle thinning, base on the gate end line, apex toward the sprue
     balancer_on: bool = False
     balancer_w_mm: float = 100.0  # base width on the gate end line
@@ -176,7 +211,7 @@ class FanGatePlateConfig:
                     f"fan_w_mm ({self.fan_w_mm}) must be ≥ well_d_mm ({self.well_d_mm}); "
                     f"inverted trapezoid is not supported"
                 )
-        else:
+        elif self.gate_type == "old":
             # the full well disc sits inside the constant-thickness part of the
             # gate: the ramp starts at or above the disc top, and the disc top is
             # at or below the gate end (else it would leak into the tab/product)
@@ -195,7 +230,67 @@ class FanGatePlateConfig:
                     f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
                     f"a mesh coarser than the gate body leaves the well disconnected"
                 )
+        else:  # wing
+            for name, val in (
+                ("wing_center_w_mm", self.wing_center_w_mm),
+                ("wing_w_mm", self.wing_w_mm),
+                ("wing_thk_mm", self.wing_thk_mm),
+                ("wing_depth_mm", self.wing_depth_mm),
+                ("wing_tri_w_mm", self.wing_tri_w_mm),
+                ("wing_tri_thk_mm", self.wing_tri_thk_mm),
+                ("wing_land_thk_mm", self.wing_land_thk_mm),
+                ("wing_body_thk_mm", self.wing_body_thk_mm),
+            ):
+                if val <= 0:
+                    raise ValueError(f"{name} must be positive (got {val})")
+            for name, val in (
+                ("wing_slope_mm", self.wing_slope_mm),
+                ("wing_land_len_mm", self.wing_land_len_mm),
+                ("wing_taper_len_mm", self.wing_taper_len_mm),
+            ):
+                if val < 0:
+                    raise ValueError(f"{name} must be ≥ 0 (got {val})")
+            if self.wing_center_w_mm < self.well_d_mm - eps:
+                raise ValueError(
+                    f"wing_center_w_mm ({self.wing_center_w_mm}) must be ≥ well_d_mm "
+                    f"({self.well_d_mm}); the core converges toward the well"
+                )
+            if self.wing_center_w_mm + 2 * self.wing_w_mm > self.plate_w_mm + eps:
+                raise ValueError(
+                    f"wing gate land wing_center_w_mm + 2·wing_w_mm "
+                    f"({self.wing_center_w_mm + 2 * self.wing_w_mm}) must be ≤ plate_w_mm "
+                    f"({self.plate_w_mm})"
+                )
+            if self.wing_tri_w_mm > self.wing_w_mm + eps:
+                raise ValueError(
+                    f"wing_tri_w_mm ({self.wing_tri_w_mm}) must be ≤ wing_w_mm "
+                    f"({self.wing_w_mm}); the wing's outer edge converges inward"
+                )
+            if self.wing_depth_mm + self.wing_slope_mm > self.gate_len_mm + eps:
+                raise ValueError(
+                    f"wing_depth_mm + wing_slope_mm ({self.wing_depth_mm + self.wing_slope_mm}) "
+                    f"must be ≤ gate_len_mm ({self.gate_len_mm}); the side triangle and its "
+                    f"transition band live between the wing bottom and the axis line"
+                )
+            if self.wing_land_len_mm > self.wing_taper_len_mm + eps:
+                raise ValueError(
+                    f"wing_land_len_mm ({self.wing_land_len_mm}) must be ≤ wing_taper_len_mm "
+                    f"({self.wing_taper_len_mm})"
+                )
+            # same rule as the old gate: the well disc stays in the constant-
+            # thickness part of the core
+            if self.wing_taper_len_mm + self.well_d_mm / 2.0 > self.gate_len_mm + eps:
+                raise ValueError(
+                    f"wing gate: gate_len_mm ({self.gate_len_mm}) must be ≥ wing_taper_len_mm "
+                    f"({self.wing_taper_len_mm}) + well_d_mm / 2 ({self.well_d_mm / 2.0}) "
+                    f"so the well stays in the constant-thickness part of the core"
+                )
         if self.balancer_on:
+            if self.gate_type == "wing":
+                raise ValueError(
+                    "balancer_on is not supported for gate_type 'wing' (the wing gate is "
+                    "itself a flow-balance design)"
+                )
             for name, val in (
                 ("balancer_w_mm", self.balancer_w_mm),
                 ("balancer_h_mm", self.balancer_h_mm),
@@ -239,6 +334,8 @@ class FanGatePlateConfig:
         end (``old_gate_end_thk`` is then unused by the builder)."""
         if self.gate_type == "fan":
             return self.fan_thk_mm
+        if self.gate_type == "wing":
+            return self.wing_land_thk_mm
         if self.old_gate_ramp_len_mm <= 0:
             return self.old_gate_thk_mm
         return self.old_gate_end_thk_mm
@@ -249,8 +346,14 @@ class FanGatePlateConfig:
         width on the gate end line, height ≤ ``gate_len − well_d / 2`` (apex
         outside the well), thickness < the gate thickness on the gate end
         line (a cut has to remove material at least along its base). The
-        single source for :meth:`validate` and the sidebar bounds."""
-        w_max = self.fan_w_mm if self.gate_type == "fan" else self.old_gate_w_mm
+        single source for :meth:`validate` and the sidebar bounds. Meaningless
+        for the wing gate (``validate`` rejects ``balancer_on`` there)."""
+        if self.gate_type == "fan":
+            w_max = self.fan_w_mm
+        elif self.gate_type == "wing":
+            w_max = self.wing_center_w_mm
+        else:
+            w_max = self.old_gate_w_mm
         h_max = self.gate_len_mm - self.well_d_mm / 2.0
         return w_max, h_max, self.gate_end_thk_mm
 
@@ -310,12 +413,33 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
     # --- silhouette ---
     in_well = r2_axis <= r_well**2
     t_gate = np.clip((yy - y_axis) / max(cfg.gate_len_mm, 1e-12), 0.0, 1.0)
+    dd = y_gate_end - yy  # depth below the gate end line (wing gate)
     if cfg.gate_type == "fan":
         half_w_at_y = 0.5 * (cfg.well_d_mm + (cfg.fan_w_mm - cfg.well_d_mm) * t_gate)
         in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_w_at_y)
         in_gate = in_gate_body | (in_well & (yy <= y_axis))
-    else:
+    elif cfg.gate_type == "old":
         in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= cfg.old_gate_w_mm / 2.0)
+        in_gate = in_gate_body | in_well
+    else:  # wing: core (converging to the well) + wing lands + side triangles
+        half_land = 0.5 * cfg.wing_center_w_mm
+        half_core = 0.5 * (cfg.well_d_mm + (cfg.wing_center_w_mm - cfg.well_d_mm) * t_gate)
+        in_core = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_core)
+        # wing land: outer edge slants from the tip (depth 0) down to the
+        # triangle's outer top corner at (half_land + wing_tri_w, wing_depth)
+        t_wing = np.clip(dd / max(cfg.wing_depth_mm, 1e-12), 0.0, 1.0)
+        outer_wing = half_land + cfg.wing_w_mm + (cfg.wing_tri_w_mm - cfg.wing_w_mm) * t_wing
+        in_wing = (dd >= 0.0) & (dd <= cfg.wing_depth_mm) & (ax > half_core) & (ax <= outer_wing)
+        # side triangle: outer hypotenuse converges to the well tangent on the axis line
+        tri_span = cfg.gate_len_mm - cfg.wing_depth_mm
+        t_tri = np.clip((dd - cfg.wing_depth_mm) / max(tri_span, 1e-12), 0.0, 1.0)
+        outer_tri = (
+            half_land
+            + cfg.wing_tri_w_mm
+            + (0.5 * cfg.well_d_mm - half_land - cfg.wing_tri_w_mm) * t_tri
+        )
+        in_tri = (dd > cfg.wing_depth_mm) & (yy >= y_axis) & (ax > half_core) & (ax <= outer_tri)
+        in_gate_body = in_core | in_wing | in_tri
         in_gate = in_gate_body | in_well
     in_x_plate = (xx >= pad) & (xx <= pad + cfg.plate_w_mm)
     in_tab = (
@@ -337,7 +461,7 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
             gate_thk = np.full_like(xx, cfg.fan_thk_mm, dtype=float)
         else:
             gate_thk = cfg.fan_thk_well_mm + (cfg.fan_thk_mm - cfg.fan_thk_well_mm) * t_gate
-    else:
+    elif cfg.gate_type == "old":
         # old_gate_thk up to the ramp start, then linear down to old_gate_end_thk
         y_ramp_start = y_gate_end - cfg.old_gate_ramp_len_mm
         if cfg.old_gate_ramp_len_mm > 1e-12:
@@ -345,7 +469,23 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         else:
             t_ramp = np.zeros_like(yy)
         gate_thk = cfg.old_gate_thk_mm + (cfg.old_gate_end_thk_mm - cfg.old_gate_thk_mm) * t_ramp
+    else:
+        # wing core: flat land, then a linear land→body taper, then body_thk
+        taper_span = cfg.wing_taper_len_mm - cfg.wing_land_len_mm
+        if taper_span > 1e-12:
+            t_taper = np.clip((dd - cfg.wing_land_len_mm) / taper_span, 0.0, 1.0)
+        else:
+            t_taper = (dd > cfg.wing_taper_len_mm).astype(float)
+        gate_thk = cfg.wing_land_thk_mm + (cfg.wing_body_thk_mm - cfg.wing_land_thk_mm) * t_taper
     thk[in_gate] = gate_thk[in_gate]
+
+    if cfg.gate_type == "wing":
+        # wing lands and side triangles override the core profile; the
+        # wing→triangle step is blended over wing_slope into the triangle
+        thk[in_wing] = cfg.wing_thk_mm
+        t_slope = np.clip((dd - cfg.wing_depth_mm) / max(cfg.wing_slope_mm, 1e-12), 0.0, 1.0)
+        tri_thk = cfg.wing_thk_mm + (cfg.wing_tri_thk_mm - cfg.wing_thk_mm) * t_slope
+        thk[in_tri] = tri_thk[in_tri]
 
     # balancer: base on the gate end line (touches the tab / product edge),
     # apex balancer_h toward the sprue; half-width grows linearly apex → base
@@ -394,7 +534,7 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         mask=mask,
         thickness_mm=thk,
         cell_size_mm=dx,
-        label="fan_gate_plate" if cfg.gate_type == "fan" else "old_gate_plate",
+        label=f"{cfg.gate_type}_gate_plate",
         compression_mask=(in_plate | in_tab) & mask,
         product_mask=in_plate & mask,
         valve_axis_x_mm=cx,
