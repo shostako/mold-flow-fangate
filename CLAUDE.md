@@ -3,18 +3,19 @@
 額縁肉厚プレート（外周 t=1 / 内側 t=4）＋ファンゲート＋スプルー直結の射出成形流動解析。
 [mold-flow-sim](../mold-flow-sim) aa96e6c (v0.37.0) を起点に、**別リポ**として立ち上げた（sim 側は触らない）。
 
-## 現状（2026-08-27）
+## 現状（2026-09-07）
 - 形状仕様は `docs/spec.md`、図は `docs/draft/geometry_draft.png`
 - sim の形状非依存モジュールは `core/` に移植済み（v0.1.0）。`geometry.py` は `Geometry` dataclass と
   `build_demo_geometry` のみ
 - builder は `core/fan_gate.py`（`FanGatePlateConfig` / `build_fan_gate_plate_geometry`）。既定値が spec の実機。
-  `gate_type`（fan/old）× `tab_on` の 4 通り（v0.4.0）。圧縮マスク＝製品＋タブ（＝ゲート端より製品側）、
+  `gate_type`（fan/old/wing）× `tab_on`（v0.4.0、wing は v0.6.0）。圧縮マスク＝製品＋タブ（＝ゲート端より製品側）、
   `Geometry.product_mask`（製品のみ）が表示原点を決める。肉盗み `balancer_*`（v0.5.0）はゲート端に底辺を置く逆三角、
-  ゲート本体でクリップして圧縮部には入らない
+  ゲート本体でクリップして圧縮部には入らない。ウイングゲート `wing_*`（v0.6.0、旧ゲート発展版）は中央コア＋t0.6 両翼
+  ランド 220＋t2.0 三角形で、肉盗みとは併用不可（validate が拒否）
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
 - Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
   形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
-- 次の候補: 4 通り（＋肉盗み）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
+- 次の候補: ゲート形状（＋肉盗み／ウイング）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
 - Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
   `runtime.txt` は `python-3.12`。deps を変えたら requirements.txt も同期

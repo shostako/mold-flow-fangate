@@ -63,7 +63,7 @@ st.set_page_config(page_title="額縁プレート ファンゲート 流動解�
 st.title("額縁プレート ファンゲート 流動解析")
 st.caption(
     "額縁肉厚プレート（外周薄肉／内側厚肉）をファンゲート＋スプルー直結で射出（圧縮）成形するときの"
-    "樹脂流動を簡易解析するツール。タブ・ゲート形状（ファン／旧ゲート）・圧縮条件の方向性検討を、実機評価前の"
+    "樹脂流動を簡易解析するツール。タブ・ゲート形状（ファン／旧ゲート／ウイング）・圧縮条件の方向性検討を、実機評価前の"
     "初期検討段階で迅速に行うことを目的とする。商用 CAE（Moldflow 等）の代替を意図したものではない。"
 )
 
@@ -248,7 +248,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "- 薄板キャビティ内の 2D 流動（局所剪断と局所抵抗の効果）\n"
         "- 樹脂物性（密度・比熱・熱拡散率 → 熱伝導率派生・Cross-WLF 粘度パラメータ）\n"
-        "- 額縁プレートの 2 段肉厚、全幅タブ（平面→傾斜、有無を選択）、ゲート形状（ファン 均一／テーパー、旧タブゲート）、井戸・コールドスラッグの深さ\n"
+        "- 額縁プレートの 2 段肉厚、全幅タブ（平面→傾斜、有無を選択）、ゲート形状（ファン 均一／テーパー、旧タブゲート、ウイングゲート）、井戸・コールドスラッグの深さ\n"
         "- 流動先端の到達順、ウェルドライン、エアトラップ\n"
         "- 圧力分布の相対値（ゲート＝1、最終充填点＝0 の正規化）\n"
         "- 充填時間（射出率 $Q$ から逆算した絶対時間）\n"
@@ -310,7 +310,11 @@ material_keys = list(db.keys())
 
 # ----------------------- fan-gate plate: parametric inputs -----------------------
 _D = FanGatePlateConfig()  # spec defaults (docs/spec.md)
-_GATE_LABELS = {"ファンゲート": "fan", "旧ゲート（タブゲート）": "old"}
+_GATE_LABELS = {
+    "ファンゲート": "fan",
+    "旧ゲート（タブゲート）": "old",
+    "ウイングゲート": "wing",
+}
 
 
 def _fan_gate_sidebar() -> dict:
@@ -390,22 +394,67 @@ def _fan_gate_sidebar() -> dict:
                 )
             else:
                 v["fan_thk_well_mm"] = None
-        for f in (
-            "old_gate_w_mm",
-            "old_gate_thk_mm",
-            "old_gate_ramp_len_mm",
-            "old_gate_end_thk_mm",
-        ):
-            v[f] = float(getattr(_D, f))
-    else:
+    elif v["gate_type"] == "old":
         with st.expander("旧ゲート（タブゲート）", expanded=False):
             num("old_gate_w_mm", "ゲート幅 [mm]", 1.0, 600.0, 1.0, fmt="%.1f")
             num("old_gate_thk_mm", "ゲート肉厚（井戸側、井戸円ごと）[mm]", 0.1, 10.0, 0.05)
             num("old_gate_ramp_len_mm", "ゲート端手前の傾斜長 [mm]", 0.0, 300.0, 1.0, fmt="%.1f")
             num("old_gate_end_thk_mm", "ゲート端の厚み（タブ接続）[mm]", 0.1, 10.0, 0.05)
-        v["fan_w_mm"] = float(_D.fan_w_mm)
-        v["fan_thk_mm"] = float(_D.fan_thk_mm)
-        v["fan_thk_well_mm"] = None
+    else:
+        with st.expander("ウイングゲート", expanded=False):
+            st.caption(
+                "中央の旧ゲートコア（井戸へ絞る）＋左右の薄肉ウイングランド＋両脇の三角形。"
+                "図面の実機は井戸 φ23（下の「井戸・コールドスラッグ・スプルー」で設定）。"
+            )
+            num(
+                "wing_center_w_mm",
+                "中央コア幅（ゲート端、井戸径以上）[mm]",
+                1.0,
+                600.0,
+                1.0,
+                fmt="%.1f",
+            )
+            num("wing_w_mm", "ウイング幅（片側）[mm]", 1.0, 300.0, 1.0, fmt="%.1f")
+            num("wing_thk_mm", "ウイング肉厚 [mm]", 0.05, 5.0, 0.05)
+            num(
+                "wing_depth_mm",
+                "ウイング深さ（ゲート端 → 三角形上辺）[mm]",
+                1.0,
+                300.0,
+                1.0,
+                fmt="%.1f",
+            )
+            num("wing_tri_thk_mm", "三角形部の肉厚 [mm]", 0.1, 10.0, 0.05)
+            num("wing_body_thk_mm", "コア本体肉厚（井戸側）[mm]", 0.1, 10.0, 0.05)
+            st.caption(
+                f"固定値（config で変更可）: 三角形上辺の張り出し {_D.wing_tri_w_mm:.0f} mm、"
+                f"ウイング→三角形の傾斜帯 {_D.wing_slope_mm:.0f} mm、"
+                f"コアのランド {_D.wing_land_len_mm:.0f} mm × t{_D.wing_land_thk_mm:.1f}、"
+                f"ランド→本体テーパー終端 {_D.wing_taper_len_mm:.0f} mm"
+            )
+    # every gate-specific field the active branch did not draw falls back to
+    # the spec default, so FanGatePlateConfig(**v) always gets a full record
+    for f in (
+        "fan_w_mm",
+        "fan_thk_mm",
+        "old_gate_w_mm",
+        "old_gate_thk_mm",
+        "old_gate_ramp_len_mm",
+        "old_gate_end_thk_mm",
+        "wing_center_w_mm",
+        "wing_w_mm",
+        "wing_thk_mm",
+        "wing_depth_mm",
+        "wing_tri_w_mm",
+        "wing_tri_thk_mm",
+        "wing_slope_mm",
+        "wing_land_len_mm",
+        "wing_land_thk_mm",
+        "wing_taper_len_mm",
+        "wing_body_thk_mm",
+    ):
+        v.setdefault(f, float(getattr(_D, f)))
+    v.setdefault("fan_thk_well_mm", None)
     with st.expander("井戸・コールドスラッグ・スプルー", expanded=False):
         num("well_d_mm", "井戸径 φ [mm]", 1.0, 100.0, 0.5, fmt="%.1f")
         num("well_depth_mm", "井戸深さ [mm]", 0.1, 20.0, 0.1, fmt="%.1f")
@@ -416,60 +465,67 @@ def _fan_gate_sidebar() -> dict:
             "sprue_top_d_mm", "スプルー上端径 φ（参考、解析未使用）[mm]", 0.5, 50.0, 0.5, fmt="%.1f"
         )
         num("sprue_len_mm", "スプルー長 L（参考、解析未使用）[mm]", 1.0, 100.0, 1.0, fmt="%.1f")
-    with st.expander("肉盗み（▽ フローバランサー）", expanded=False):
-        v["balancer_on"] = st.checkbox(
-            "肉盗みを有効化（ゲート端に底辺を置く逆三角形の薄肉部）",
-            value=_D.balancer_on,
-            key="fg_balancer_on",
-            help="底辺はゲート端（タブ／製品エッジとの接続線）、頂点はスプルー側。"
-            "ゲート幅中央に置く。ゲート本体の内側だけ削る（圧縮部には入らない）。",
-        )
-        # the bounds come from the config itself (single source with validate());
-        # v holds every field the limits depend on by this point
-        w_max, h_max, thk_sup = FanGatePlateConfig(**v).balancer_limits_mm
-        W_MIN, H_MIN, THK_MIN, THK_STEP = 1.0, 1.0, 0.05, 0.05
-        thk_hi = round(thk_sup - THK_STEP, 2)
-        if v["balancer_on"] and (h_max < H_MIN or w_max < W_MIN or thk_hi < THK_MIN):
-            st.warning(
-                "この形状には肉盗みを置けない（ゲート長 − 井戸半径 = "
-                f"{h_max:.1f} mm、ゲート端の幅 {w_max:.1f} mm、ゲート端の厚み {thk_sup:.2f} mm）。"
-                "ゲートを長く／広く／厚くするか、肉盗みを OFF にする。"
+    if v["gate_type"] == "wing":
+        # the wing gate is itself a flow-balance design; validate() rejects
+        # balancer_on there, so the expander is not offered at all
+        v["balancer_on"] = False
+        for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
+            v[f] = float(getattr(_D, f))
+    else:
+        with st.expander("肉盗み（▽ フローバランサー）", expanded=False):
+            v["balancer_on"] = st.checkbox(
+                "肉盗みを有効化（ゲート端に底辺を置く逆三角形の薄肉部）",
+                value=_D.balancer_on,
+                key="fg_balancer_on",
+                help="底辺はゲート端（タブ／製品エッジとの接続線）、頂点はスプルー側。"
+                "ゲート幅中央に置く。ゲート本体の内側だけ削る（圧縮部には入らない）。",
             )
-            v["balancer_on"] = False
-        if v["balancer_on"]:
-            # the upper bounds follow the gate; the defaults are clamped so a
-            # narrow gate (old: 30) does not start above its own maximum
-            for field, label, lo, hi, step, fmt in (
-                ("balancer_w_mm", "底辺幅（ゲート端）[mm]", W_MIN, w_max, 1.0, "%.1f"),
-                (
-                    "balancer_h_mm",
-                    "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]",
-                    H_MIN,
-                    h_max,
-                    1.0,
-                    "%.1f",
-                ),
-                (
-                    "balancer_thk_mm",
-                    "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
-                    THK_MIN,
-                    thk_hi,
-                    THK_STEP,
-                    "%.2f",
-                ),
-            ):
-                v[field] = st.number_input(
-                    label,
-                    min_value=lo,
-                    max_value=float(hi),
-                    value=min(float(getattr(_D, field)), float(hi)),
-                    step=step,
-                    format=fmt,
-                    key=f"fg_{field}",
+            # the bounds come from the config itself (single source with validate());
+            # v holds every field the limits depend on by this point
+            w_max, h_max, thk_sup = FanGatePlateConfig(**v).balancer_limits_mm
+            W_MIN, H_MIN, THK_MIN, THK_STEP = 1.0, 1.0, 0.05, 0.05
+            thk_hi = round(thk_sup - THK_STEP, 2)
+            if v["balancer_on"] and (h_max < H_MIN or w_max < W_MIN or thk_hi < THK_MIN):
+                st.warning(
+                    "この形状には肉盗みを置けない（ゲート長 − 井戸半径 = "
+                    f"{h_max:.1f} mm、ゲート端の幅 {w_max:.1f} mm、ゲート端の厚み {thk_sup:.2f} mm）。"
+                    "ゲートを長く／広く／厚くするか、肉盗みを OFF にする。"
                 )
-        else:
-            for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
-                v[f] = float(getattr(_D, f))
+                v["balancer_on"] = False
+            if v["balancer_on"]:
+                # the upper bounds follow the gate; the defaults are clamped so a
+                # narrow gate (old: 30) does not start above its own maximum
+                for field, label, lo, hi, step, fmt in (
+                    ("balancer_w_mm", "底辺幅（ゲート端）[mm]", W_MIN, w_max, 1.0, "%.1f"),
+                    (
+                        "balancer_h_mm",
+                        "高さ（ゲート端 → 頂点、井戸の手前まで）[mm]",
+                        H_MIN,
+                        h_max,
+                        1.0,
+                        "%.1f",
+                    ),
+                    (
+                        "balancer_thk_mm",
+                        "薄肉部の厚み（ゲート端の厚みより薄く）[mm]",
+                        THK_MIN,
+                        thk_hi,
+                        THK_STEP,
+                        "%.2f",
+                    ),
+                ):
+                    v[field] = st.number_input(
+                        label,
+                        min_value=lo,
+                        max_value=float(hi),
+                        value=min(float(getattr(_D, field)), float(hi)),
+                        step=step,
+                        format=fmt,
+                        key=f"fg_{field}",
+                    )
+            else:
+                for f in ("balancer_w_mm", "balancer_h_mm", "balancer_thk_mm"):
+                    v[f] = float(getattr(_D, f))
     with st.expander("メッシュ", expanded=False):
         v["cell_size_mm"] = st.slider(
             "メッシュ粗さ [mm/cell]", 0.5, 4.0, float(_D.cell_size_mm), 0.25, key="fg_cell_size_mm"
