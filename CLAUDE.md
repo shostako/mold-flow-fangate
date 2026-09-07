@@ -12,7 +12,8 @@
   `Geometry.product_mask`（製品のみ）が表示原点を決める。肉盗み `balancer_*`（v0.5.0）はゲート端に底辺を置く逆三角、
   ゲート本体でクリップして圧縮部には入らない。ウイングゲート `wing_*`（v0.6.0、旧ゲート発展版）は中央コア＋t0.6 両翼
   ランド 220＋t2.0 三角形で、肉盗みとは併用不可（validate が拒否）。旧ゲートは v0.7.0 で井戸へ絞る台形に改修、
-  井戸の既定は φ23（テスト注意: ゲート端等の境界が 1 mm 格子のセル中心に乗る。バンドは閉区間、厳密検証は 0.5 mm 格子で）
+  井戸の既定は φ23。`grid_shift_mm` が下側パッドを 1 セル未満伸ばして製品エッジをセルエッジに揃えるので、
+  mm 倍数寸法なら既定 1 mm 格子で解析値と厳密一致する（テストの probe バンドは境界に触るとき閉区間＋ `.any()` ガード）
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
 - Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
   形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
