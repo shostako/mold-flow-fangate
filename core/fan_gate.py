@@ -17,10 +17,12 @@ Two gate shapes (``gate_type``), same axis position and ``gate_len``:
   on the axis line and whose long edge is ``fan_w`` at ``y_gate_end``.
   ``fan_thk`` uniform, or a linear taper ``fan_thk_well → fan_thk`` from the
   axis line to the long edge when ``fan_thk_well`` is set.
-- ``"old"`` (the original tab gate): full well disc ∪ rectangle ``old_gate_w``
-  wide from the axis line to ``y_gate_end``. ``old_gate_thk`` (4.0) from the
-  well up to ``old_gate_ramp_len`` before the gate end, then a linear ramp
-  down to ``old_gate_end_thk`` (2.0) at the gate end.
+- ``"old"`` (the original tab gate): full well disc ∪ a converging trapezoid,
+  ``old_gate_w`` wide at ``y_gate_end``, flanks narrowing linearly to touch
+  the well ``well_d`` on the axis line (2026-09-08: same silhouette rule as
+  the wing core; it was a plain rectangle before). ``old_gate_thk`` (4.0)
+  from the well up to ``old_gate_ramp_len`` before the gate end, then a
+  linear ramp down to ``old_gate_end_thk`` (2.0) at the gate end.
 - ``"wing"`` (the old gate's successor, 2026-09 sketch): three parts, all
   measured by the depth ``d`` below the gate end line.
 
@@ -60,7 +62,7 @@ painted after the gate thickness, before the well / slug), and ``validate``
 requires ``balancer_thk`` below the gate thickness on the gate end line
 (where the base sits), so the ▽ is a real cut at least along its base. Intersected with the gate body as a guard; under ``validate``
 (base ≤ gate width on the gate end line, apex above the well) the ▽ lies
-inside the trapezoid / rectangle anyway, since both half-widths are linear
+inside the fan / old-gate trapezoid anyway, since both half-widths are linear
 in y and the gate's is ≥ the ▽'s at both ends. Not part of the compression
 zone.
 
@@ -114,7 +116,8 @@ class FanGatePlateConfig:
     fan_w_mm: float = 250.0
     fan_thk_mm: float = 2.0  # at the gate end (uniform when fan_thk_well_mm is None)
     fan_thk_well_mm: float | None = None  # at the axis line; enables a linear taper
-    # old tab gate: rectangle old_gate_w wide, old_gate_thk from the well up to
+    # old tab gate: converging trapezoid, old_gate_w at the gate end narrowing
+    # to well_d on the axis line; old_gate_thk from the well up to
     # old_gate_ramp_len before the gate end, then a ramp down to old_gate_end_thk
     old_gate_w_mm: float = 30.0
     old_gate_thk_mm: float = 4.0
@@ -138,8 +141,9 @@ class FanGatePlateConfig:
     balancer_w_mm: float = 100.0  # base width on the gate end line
     balancer_h_mm: float = 20.0  # gate end → apex
     balancer_thk_mm: float = 1.0  # thickness inside the triangle
-    # well (pocket at the sprue foot) and cold slug
-    well_d_mm: float = 20.0
+    # well (pocket at the sprue foot) and cold slug. φ23 is the mold's current
+    # state (the 2026-09 wing-gate drawing); it was φ20 before that rework
+    well_d_mm: float = 23.0
     well_depth_mm: float = 3.0
     slug_d_mm: float = 6.0
     slug_depth_mm: float = 5.0
@@ -225,10 +229,10 @@ class FanGatePlateConfig:
                 raise ValueError(
                     f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≤ plate_w_mm ({self.plate_w_mm})"
                 )
-            if self.cell_size_mm > self.old_gate_w_mm + eps:
+            if self.old_gate_w_mm < self.well_d_mm - eps:
                 raise ValueError(
-                    f"cell_size_mm ({self.cell_size_mm}) must be ≤ old_gate_w_mm ({self.old_gate_w_mm}); "
-                    f"a mesh coarser than the gate body leaves the well disconnected"
+                    f"old_gate_w_mm ({self.old_gate_w_mm}) must be ≥ well_d_mm "
+                    f"({self.well_d_mm}); the gate converges toward the well"
                 )
         else:  # wing
             for name, val in (
@@ -419,7 +423,10 @@ def build_fan_gate_plate_geometry(cfg: FanGatePlateConfig) -> Geometry:
         in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_w_at_y)
         in_gate = in_gate_body | (in_well & (yy <= y_axis))
     elif cfg.gate_type == "old":
-        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= cfg.old_gate_w_mm / 2.0)
+        # converging trapezoid: old_gate_w at the gate end → well_d on the axis
+        # line (2026-09-08 rework, same rule as the wing core)
+        half_old = 0.5 * (cfg.well_d_mm + (cfg.old_gate_w_mm - cfg.well_d_mm) * t_gate)
+        in_gate_body = (yy >= y_axis) & (yy <= y_gate_end) & (ax <= half_old)
         in_gate = in_gate_body | in_well
     else:  # wing: core (converging to the well) + wing lands + side triangles
         half_land = 0.5 * cfg.wing_center_w_mm

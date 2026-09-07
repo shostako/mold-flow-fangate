@@ -3,7 +3,7 @@
 額縁肉厚プレート（外周 t=1 / 内側 t=4）＋ファンゲート＋スプルー直結の射出成形流動解析。
 [mold-flow-sim](../mold-flow-sim) aa96e6c (v0.37.0) を起点に、**別リポ**として立ち上げた（sim 側は触らない）。
 
-## 現状（2026-09-07）
+## 現状（2026-09-08）
 - 形状仕様は `docs/spec.md`、図は `docs/draft/geometry_draft.png`
 - sim の形状非依存モジュールは `core/` に移植済み（v0.1.0）。`geometry.py` は `Geometry` dataclass と
   `build_demo_geometry` のみ
@@ -11,7 +11,8 @@
   `gate_type`（fan/old/wing）× `tab_on`（v0.4.0、wing は v0.6.0）。圧縮マスク＝製品＋タブ（＝ゲート端より製品側）、
   `Geometry.product_mask`（製品のみ）が表示原点を決める。肉盗み `balancer_*`（v0.5.0）はゲート端に底辺を置く逆三角、
   ゲート本体でクリップして圧縮部には入らない。ウイングゲート `wing_*`（v0.6.0、旧ゲート発展版）は中央コア＋t0.6 両翼
-  ランド 220＋t2.0 三角形で、肉盗みとは併用不可（validate が拒否）
+  ランド 220＋t2.0 三角形で、肉盗みとは併用不可（validate が拒否）。旧ゲートは v0.7.0 で井戸へ絞る台形に改修、
+  井戸の既定は φ23（テスト注意: ゲート端等の境界が 1 mm 格子のセル中心に乗る。バンドは閉区間、厳密検証は 0.5 mm 格子で）
 - sim の `FilmGateConfig` 依存テスト（two_phase / compression_stroke / settings_record）は新 builder で書き直し済み（v0.2.1）
 - Streamlit UI `app.py`（v0.3.0）: sim の app.py からソルバ設定とメインパネルを持ち込み、形状入力だけ差し替え。
   形状ウィジェットは `fg_<field>` キー。UI テストは `tests/ui_helpers.py` の `app(fast=True)`（4 mm セル）で回す
