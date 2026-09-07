@@ -12,6 +12,7 @@ from .materials import MaterialDB, cross_wlf_viscosity
 from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
+    draw_gate_markers,
     export_frames,
     fill_frame_fractions,
     fill_frame_times,
@@ -44,6 +45,7 @@ __all__ = [
     "render_weldlines",
     "render_skin_layer_map",
     "render_core_layer_map",
+    "draw_gate_markers",
     "export_frames",
     "fill_frame_times",
     "fill_frame_fractions",

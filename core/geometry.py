@@ -44,6 +44,12 @@ class Geometry:
     # the display falls back to the rasterized gate-cell centroid (which an
     # orifice clipped by a one-sided pocket shifts mesh-dependently).
     valve_axis_x_mm: float | None = None
+    # Nominal injection orifice ``(x_mm, y_mm, radius_mm)`` in the grid frame,
+    # recorded by the builder from the configured geometry (fan-gate plate:
+    # the sprue foot disc). The gate marker draws this one true-scale circle
+    # instead of one symbol per rasterized Dirichlet cell (sim v0.38.1);
+    # ``None`` falls back to the 4-connected components of the gate cells.
+    valve_marker_mm: tuple[float, float, float] | None = None
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -121,6 +127,10 @@ class Geometry:
             # keeps cells on one side, and the centroid then drifts off the
             # valve axis by a mesh-dependent amount (Codex P2, PR #76).
             x0 = float(self.valve_axis_x_mm)
+        elif self.valve_marker_mm is not None:
+            # Same record, other field: a copy path that carried only the
+            # marker must not put x = 0 off the disk it draws.
+            x0 = float(self.valve_marker_mm[0])
         else:
             x0 = float((float(gate_ixs.mean()) + 0.5) * self.cell_size_mm)
         y0 = float((float(gate_iys.mean()) + 0.5) * self.cell_size_mm)
