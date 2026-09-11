@@ -873,6 +873,10 @@ with st.sidebar:
                 # 届いた値が過去の自動値のどれかと一致するなら echo であって編集では
                 # ない（13 桁の浮動小数を手で打つことはない）— それだけを除外する。
                 _v_cav = float(geom.volume_cm3())
+                # 履歴の深さ 32 は「echo が届くより先に積もる形状変更の回数」の上限。
+                # 1 rerun は形状ビルドで 0.5〜1 s かかり、ブラウザの echo 遅れは
+                # 高々数 rerun なので 32 で桁余り。超えれば echo を編集と誤判定する
+                # が、その場合もリセットボタンで追従を再開できる。
                 _auto_hist: list[float] = st.session_state.setdefault(
                     "mfs_shot_volume_auto_history", []
                 )
