@@ -563,7 +563,7 @@ with st.sidebar:
     fan_inputs = _fan_gate_sidebar()
 
     with st.expander("材料", expanded=False):
-        material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PP_T20"))
+        material_key = st.selectbox("樹脂", material_keys, index=material_keys.index("PMMA"))
         mat = db[material_key]
         st.caption(f"{mat.name}")
         st.caption(
@@ -602,7 +602,7 @@ with st.sidebar:
         wall_model = st.radio(
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
-            index=0,
+            index=1,
             key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
@@ -621,8 +621,9 @@ with st.sidebar:
 
         # default container (so downstream `solver = HeleShawSolver(...)` /
         # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-        # 既定モードは『なし』(index=0) — 二相ショートショット（計量律速、凍結なし）
-        # を既定 ON にしているため。層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
+        # 既定モードは『スキン層』(index=1) — 既定 ON の二相ショートショットと併用でき、
+        # 射出相で薄い額縁が痩せる順番まで出る（層別は二相と併用不可）。
+        # 層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
         #   層数 N: 7 (壁勾配が急なので N=5 から増量)
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
         skin_on = wall_model == "skin"

@@ -12,13 +12,15 @@ from tests.ui_helpers import app as _app
 from tests.ui_helpers import texts as _texts
 
 
-def test_the_defaults_are_two_phase_on_with_icm_and_no_wall_model():
-    """UI defaults (v0.29.0): two-phase ON, ICM ON at 0.50 mm stroke, wall
-    model 'none' -- the combination the two-phase model actually runs in."""
+def test_the_defaults_are_two_phase_on_with_icm_and_skin_wall_model():
+    """UI defaults (v0.7.2): PMMA, two-phase ON, ICM ON at 0.50 mm stroke, wall
+    model 'skin' -- a combination the two-phase model actually runs in
+    (only 'multilayer' is incompatible). Independent of the gate type."""
     at = _app()
+    assert at.selectbox[0].value == "PMMA"
     assert at.checkbox(key="two_phase_on").value is True
     assert at.checkbox(key="icm_on").value is True
-    assert at.radio(key="wall_model").value == "none"
+    assert at.radio(key="wall_model").value == "skin"
     stroke = [s for s in at.slider if str(s.label).startswith("圧縮ストローク")]
     assert len(stroke) == 1 and stroke[0].value == 0.50
 
