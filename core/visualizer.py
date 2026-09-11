@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import matplotlib
@@ -1206,6 +1207,17 @@ def _two_phase_rgba(result, injection_filled, compression_filled) -> np.ndarray:
     return rgba
 
 
+def _fraction_label(fr: float) -> str:
+    """``100%`` only for a complete fill. Anything short is floored to one
+    decimal, so neither a 99.6% nor a 99.99% short shot can round up to
+    ``100%`` (2026-09-11, Codex P2)."""
+    if math.isnan(fr):  # metadata without the key: keep the old "nan%" instead of ValueError
+        return "nan%"
+    if fr >= 1.0:
+        return f"{fr:.0%}"
+    return f"{math.floor(fr * 1000) / 1000:.1%}"
+
+
 def render_two_phase_map(
     result,
     output_path: str | Path,
@@ -1253,10 +1265,10 @@ def render_two_phase_map(
     _draw_gate_markers(ax, result)
 
     md = result.metadata
-    title = "Two-phase short shot — shot {v:.1f} cm3, injection {fi:.0%} → after compression {ff:.0%}".format(
+    title = "Two-phase short shot — shot {v:.1f} cm3, injection {fi:.0%} → after compression {ff}".format(
         v=result.shot_volume_cm3,
         fi=md.get("injection_fill_fraction", float("nan")),
-        ff=md.get("final_fill_fraction", float("nan")),
+        ff=_fraction_label(md.get("final_fill_fraction", float("nan"))),
     )
     if md.get("skin_layer_enabled"):
         title += "\nskin layer c={c:.2f}, T_inj={t:.3f} s".format(

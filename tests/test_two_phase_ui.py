@@ -177,6 +177,97 @@ def test_the_shot_volume_defaults_to_the_cavity_volume_and_follows_the_geometry(
     assert at.session_state["mfs_shot_volume_auto"] == v0
 
 
+def _edited(at) -> bool:
+    return (
+        "mfs_shot_volume_user_edited" in at.session_state
+        and at.session_state["mfs_shot_volume_user_edited"]
+    )
+
+
+def test_the_shot_volume_keeps_following_when_the_browser_echoes_a_stale_value():
+    """Rapid clicks on a geometry widget can start the next rerun before the
+    previous rerun's new shot volume reached the browser; the browser then
+    sends its stale widget value, which differs from the server's latest
+    value, so Streamlit dispatches the field's on_change before the script
+    body runs (Codex P1). Going through ``set_value`` takes exactly that
+    path. A value that is one of the earlier auto values is an echo, not an
+    edit, so the default keeps following (2026-09-11: t0.65 shot at t0.9)."""
+    at = _app()
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    _width(at).set_value(400.0)
+    at.run()
+    v1 = at.number_input(key="two_phase_shot_volume").value
+    assert v1 != v0
+    # the stale echo: the browser still holds v0 while the server holds v1,
+    # and the user's next click changes the geometry again
+    at.number_input(key="two_phase_shot_volume").set_value(v0)
+    _width(at).set_value(450.0)
+    at.run()
+    v2 = at.number_input(key="two_phase_shot_volume").value
+    assert v2 == at.session_state["mfs_shot_volume_auto"] and v2 not in (v0, v1)
+    assert not _edited(at)
+    assert "計量がキャビティ体積を" not in _texts(at)
+    # and the same echo, one more rerun late (the browser is two runs behind)
+    at.number_input(key="two_phase_shot_volume").set_value(v1)
+    _width(at).set_value(315.0)
+    at.run()
+    assert (
+        at.number_input(key="two_phase_shot_volume").value
+        == v0
+        == at.session_state["mfs_shot_volume_auto"]
+    )
+    assert not _edited(at)
+
+
+def test_an_edited_shot_volume_shows_the_shortfall_and_the_reset_button_resumes_following():
+    at = _app()
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    at.number_input(key="two_phase_shot_volume").set_value(v0 - 1.0).run()
+    assert at.session_state["mfs_shot_volume_user_edited"] is True
+    assert "計量がキャビティ体積を 1.00 cm³ 下回る" in _texts(at)
+    at.button(key="two_phase_shot_volume_reset").click().run()
+    assert not at.session_state["mfs_shot_volume_user_edited"]
+    assert at.number_input(key="two_phase_shot_volume").value == v0
+    assert "計量がキャビティ体積を" not in _texts(at)
+    _width(at).set_value(400.0)
+    at.run()
+    assert (
+        at.number_input(key="two_phase_shot_volume").value
+        == at.session_state["mfs_shot_volume_auto"]
+        != v0
+    )
+
+
+def test_an_edited_shot_volume_survives_toggling_the_analysis_off_and_on():
+    """Streamlit drops the widget's session_state entry on a rerun that does not
+    render it (two-phase OFF), while the non-widget edited flag stays. Without
+    restoring, the field comes back at its minimum 0.01 cm³ and the next run is
+    a near-empty shot (Codex P2 on PR #87)."""
+    at = _app()
+    v0 = at.number_input(key="two_phase_shot_volume").value
+    at.number_input(key="two_phase_shot_volume").set_value(v0 - 1.0).run()
+    assert _edited(at)
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    assert "two_phase_shot_volume" not in at.session_state  # the premise
+    at.checkbox(key="two_phase_on").set_value(True).run()
+    assert at.number_input(key="two_phase_shot_volume").value == v0 - 1.0
+    assert _edited(at)
+    assert "計量がキャビティ体積を 1.00 cm³ 下回る" in _texts(at)
+    # an untouched field comes back at the cavity volume, still following
+    at.button(key="two_phase_shot_volume_reset").click().run()
+    at.checkbox(key="two_phase_on").set_value(False).run()
+    at.checkbox(key="two_phase_on").set_value(True).run()
+    assert at.number_input(key="two_phase_shot_volume").value == v0
+    assert not _edited(at)
+    _width(at).set_value(400.0)  # ≥ the 250 mm fan width so the geometry stays valid
+    at.run()
+    assert (
+        at.number_input(key="two_phase_shot_volume").value
+        == at.session_state["mfs_shot_volume_auto"]
+        != v0
+    )
+
+
 def test_the_two_phase_run_ships_a_scrubber_and_its_standalone_player():
     at = _app()
     at.radio(key="wall_model").set_value("none")
