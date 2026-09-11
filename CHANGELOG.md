@@ -17,6 +17,10 @@ session_state に書き戻されて「編集済み」と誤判定し、以後の
   （Codex P1）— 届いた値が過去の自動値（`mfs_shot_volume_auto_history`、直近 32 件）のどれかと一致するなら echo と
   みなして編集扱いにしない。編集後は「計量をキャビティ体積に戻す（形状追従を再開）」ボタンで復帰。計量が最終
   キャビティ体積を下回るときは caption に不足量と「→ ショートショット」を明示
+- `app.py`: 編集した計量が二相 OFF→ON で 0.01 cm³ に落ちる穴を塞ぐ（sim PR #87 への Codex P2）。OFF の rerun で
+  widget が描かれないと Streamlit は `two_phase_shot_volume` を session_state から落とすが非 widget の編集フラグは残り、
+  ON に戻すと初期化を飛ばして number_input が min で再登場していた。編集値を `mfs_shot_volume_user_value` に写して
+  おき、widget が消えていたらそこから復元、未編集なら自動値で再初期化しフラグも落とす
 - `core/visualizer.py`: 二相マップのタイトルの圧縮後充填率は 100% 未満なら小数 1 桁に floor（`99.6%`。99.99% も
   `99.9%` で、丸めで 100% に化けない。Codex P2）
 - テスト: ブラウザの stale echo を `set_value(旧自動値)`（本番と同じコールバック経路）で再現して追従が続くこと
