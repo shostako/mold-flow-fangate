@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mold-flow-fangate"
-version = "0.8.1"
+version = "0.9.0"
 description = "Injection-molding flow analyzer for a frame-thickness plate fed by a fan gate + sprue (Hele-Shaw + Cross-WLF). Built on mold-flow-sim."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -34,6 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
+    "pytest-xdist>=3.5",
     "ruff>=0.5",
 ]
 

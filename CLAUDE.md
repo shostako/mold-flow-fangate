@@ -29,8 +29,16 @@
   スキン層の時計の UI 既定も `constant_rate`（速度制御）に変えた（ライブラリ既定は `constant_pressure` のまま）
 - `tests/test_injection_ui.py` の期待既定値は先頭の定数ブロック（`DEF_METER` / `DEF_SWITCHES` 等）1 箇所に集約してある。
   sim と共有するファイルなので、値を変えるときは `app.py` の定数と両方を直す
+- **fangate2 に追いつかせた（v0.9.0、2026-11-10）**: sim v0.42.3 相当で止まっていた共有部分を、fangate2 v0.12.0（sim の main e255bc9 相当）に
+  揃えた。fangate2 の 6f4b175（本リポ v0.8.1 と同じ sim 相当）を共通の祖先にした三者マージで、形状の入力と builder は本リポのまま。
+  入ったもの: スキン層の反復上限 20・未収束警告（sim v0.39.0）、層別が二相の射出相に乗る（v0.48.0）、剪断発熱の自己整合（v0.60.0）、
+  層の導通の式の修正（v0.61.0）、充填を時間で追う解き方（v0.62.0、`core/transient_fill.py`）。
+  **画面の既定が変わった**: 壁面冷却はスキン層 → 層別 N=7、充填の解き方は時間で追う、射出は 3 段 → 単段（射出率は同じ 392.7 cm³/s）。
+  上の「既定は 3 段」は v0.8.x の話で、今は段数を 2 以上にしたときだけ計量位置 140 mm と切替位置が出る。
+  `core/multilayer_solver.py`・`multilayer_thermal.py`・`two_phase.py`・`transient_fill.py`・`materials.py`・`visualizer.py` は fangate2 と一致。
+  数字は CHANGELOG 0.9.0
 - 次の候補: ゲート形状（＋肉盗み／ウイング）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
-- 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
+- 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest -n auto --dist loadscope`
 - Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
   `runtime.txt` は `python-3.12`。deps を変えたら requirements.txt も同期
 
