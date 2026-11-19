@@ -412,12 +412,21 @@ def fill_frame_times(result: FlowResult, num_frames: int) -> np.ndarray:
     return np.linspace(t_max / num_frames, t_max, num_frames)
 
 
+def filled_at(result: FlowResult, t: float) -> np.ndarray:
+    """Cells that hold melt at time ``t``. Cells the melt never reaches
+    (``unfillable_mask``: sealed off, or beyond a fill that stalled) never do,
+    whatever their ``fill_time_s`` holds for the maps."""
+    filled = result.fill_time_s <= t
+    dead = getattr(result, "unfillable_mask", None)
+    return filled & ~dead if dead is not None else filled
+
+
 def fill_frame_fractions(result: FlowResult, num_frames: int) -> np.ndarray:
     """Filled area fraction (0..1) of the cavity at each frame time."""
     g = result.geometry
     cells = max(int(g.mask.sum()), 1)
     times = fill_frame_times(result, num_frames)
-    return np.array([float((g.mask & (result.fill_time_s <= t)).sum()) / cells for t in times])
+    return np.array([float((g.mask & filled_at(result, t)).sum()) / cells for t in times])
 
 
 def render_fill_animation(
@@ -488,7 +497,7 @@ def render_fill_animation(
 
     def update(frame_idx):
         t = frames_t[frame_idx]
-        filled = result.fill_time_s <= t
+        filled = filled_at(result, t)
         overlay_im.set_array(_unfilled_overlay(result, filled))
         progress = float(filled[g.mask].sum()) / max(int(g.mask.sum()), 1)
         title_obj.set_text(_fill_title(result, t, progress, long=True))
@@ -545,6 +554,242 @@ def render_pressure_map(
         pad=0.02,
     )
     cbar.set_label("relative pressure")
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+#: Cells frozen through when the fill ends: no holding pressure, no colour scale.
+PACKING_FROZEN_RGB = (0.62, 0.62, 0.62)
+PACKING_UNFILLED_RGB = (0.80, 0.10, 0.12)
+
+
+def render_packing_reach_map(
+    result: FlowResult,
+    reach,
+    output_path: str | Path,
+    cmap: str = "viridis",
+) -> Path:
+    """Map of how long holding pressure reaches each cell after the fill.
+
+    ``reach`` is a :class:`core.packing.PackingReach`. The colour scale runs
+    from 0 to the longest solidification time in the cavity, so a cell fed
+    until it freezes shows its own solidification time and a cell behind an
+    early-freezing neck shows the neck's. Cells already frozen through at the
+    end of the fill are grey.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+
+    solid = np.nan_to_num(np.asarray(reach.solidify_s, dtype=float), nan=0.0)
+    fed = np.nan_to_num(np.asarray(reach.reach_s, dtype=float), nan=0.0)
+    vmax = float(solid[g.mask].max()) if g.mask.any() else 0.0
+    if vmax <= 0.0:
+        vmax = 1.0
+    rgba = plt.get_cmap(cmap)(np.clip(fed / vmax, 0.0, 1.0))
+    rgba[..., 3] = np.where(g.mask, 1.0, 0.0)
+    rgba[g.mask & (solid <= 0.0)] = (*PACKING_FROZEN_RGB, 1.0)
+    ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
+
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
+
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title("Holding-pressure reach after the fill")
+    ax.legend(
+        handles=[Patch(color=PACKING_FROZEN_RGB, label="frozen at the end of the fill")],
+        loc="upper right",
+        fontsize=8,
+        framealpha=0.9,
+    )
+
+    cbar = fig.colorbar(
+        plt.cm.ScalarMappable(norm=mcolors.Normalize(0, vmax), cmap=cmap),
+        ax=ax,
+        fraction=0.04,
+        pad=0.02,
+    )
+    cbar.set_label("time a molten path from the gate remains [s]")
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_packing_shrinkage_map(
+    result: FlowResult,
+    solve,
+    output_path: str | Path,
+) -> Path:
+    """Map of the volumetric shrinkage left after the holding phase.
+
+    ``solve`` is a :class:`core.packing_solve.PackingSolve` on the result's
+    grid. Shrinkage is red, overpacking (negative shrinkage: the part would
+    be larger than the cavity) blue, zero white.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+
+    pct = 100.0 * np.asarray(solve.shrinkage, dtype=float)
+    shown = g.mask & np.isfinite(pct)
+    top = max(float(pct[shown].max()), 0.5) if shown.any() else 0.5
+    bottom = min(float(pct[shown].min()), 0.0) if shown.any() else 0.0
+    if bottom < 0.0:
+        norm = mcolors.TwoSlopeNorm(vmin=bottom, vcenter=0.0, vmax=top)
+    else:
+        norm = mcolors.Normalize(vmin=-top, vmax=top)  # zero stays white, only the red half used
+    cmap = plt.get_cmap("RdBu_r")
+    rgba = cmap(norm(np.nan_to_num(pct, nan=0.0)))
+    rgba[..., 3] = np.where(shown, 1.0, 0.0)
+    ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
+
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
+
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title(
+        "Volumetric shrinkage after holding "
+        f"({solve.hold_pressure_Pa / 1e6:g} MPa, {solve.hold_time_s:g} s)"
+    )
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02)
+    if bottom >= 0.0:
+        cbar.ax.set_ylim(0.0, top)
+    cbar.set_label("volumetric shrinkage [%]  (negative = overpacked)")
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_packing_late_fill_map(
+    result: FlowResult,
+    solve,
+    output_path: str | Path,
+    cmap: str = "viridis",
+) -> Path:
+    """Map of what the holding pressure had to fill after the V/P switch.
+
+    Grey = full at the switch, colour = the time after the switch at which
+    the holding pressure filled the cell, red = never filled (short shot).
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+
+    late = np.asarray(solve.late_fill_time_s, dtype=float)
+    never = g.mask & np.isnan(late)
+    after = g.mask & np.isfinite(late) & (late > 0.0)
+    vmax = float(late[after].max()) if after.any() else 1.0
+    rgba = plt.get_cmap(cmap)(np.clip(np.nan_to_num(late, nan=0.0) / vmax, 0.0, 1.0))
+    rgba[..., 3] = np.where(g.mask, 1.0, 0.0)
+    rgba[g.mask & ~after & ~never] = (*PACKING_FROZEN_RGB, 1.0)
+    rgba[never] = (*PACKING_UNFILLED_RGB, 1.0)
+    ax.imshow(rgba, origin="lower", extent=extent, interpolation="nearest")
+
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
+
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title(
+        f"Filled by holding pressure after the V/P switch at {100 * solve.switch_fill_fraction:g} %"
+    )
+    ax.legend(
+        handles=[
+            Patch(color=PACKING_FROZEN_RGB, label="full at the switch"),
+            Patch(color=PACKING_UNFILLED_RGB, label="never filled"),
+        ],
+        loc="upper right",
+        fontsize=8,
+        framealpha=0.9,
+    )
+    cbar = fig.colorbar(
+        plt.cm.ScalarMappable(norm=mcolors.Normalize(0, vmax), cmap=cmap),
+        ax=ax,
+        fraction=0.04,
+        pad=0.02,
+    )
+    cbar.set_label("time after the switch the cell was filled [s]")
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
+def render_packing_pressure_history(
+    solve,
+    thickness_mm: np.ndarray,
+    region: np.ndarray,
+    output_path: str | Path,
+    decimals: int = 1,
+) -> Path:
+    """Cavity pressure against time during and after holding, one line per
+    wall thickness inside ``region`` (the mean over that thickness), with the
+    gate's own pressure (below the holding pressure while the machine's rate
+    limits it, zero once the gate has closed)."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    region = np.asarray(region, dtype=bool) & np.isfinite(solve.shrinkage)
+    thk = np.round(np.asarray(thickness_mm, dtype=float), decimals)
+    t = np.asarray(solve.frame_times_s, dtype=float)
+    frames = np.asarray(solve.frame_pressure_Pa, dtype=float)
+
+    fig, ax = plt.subplots(figsize=(8, 4.6), dpi=110)
+    t_end = float(solve.times_s[-1])
+    ax.step(
+        np.asarray(solve.times_s, dtype=float),
+        np.asarray(solve.gate_pressure_Pa, dtype=float) / 1e6,
+        where="post",
+        color="0.55",
+        lw=1.2,
+        ls="--",
+        label="gate",
+    )
+    styles = ["-", "-.", ":", (0, (5, 1)), (0, (3, 1, 1, 1))]
+    for k, h in enumerate(sorted({float(v) for v in thk[region]}, reverse=True)):
+        sel = region & (thk == h)
+        ax.plot(
+            t,
+            frames[:, sel].mean(axis=1) / 1e6,
+            color="k",
+            ls=styles[k % len(styles)],
+            lw=1.6,
+            label=f"t = {h:g} mm (mean)",
+        )
+    ax.set_xlim(0.0, t_end)
+    ax.set_ylim(bottom=0.0)
+    ax.set_xlabel("time after the end of the fill [s]")
+    ax.set_ylabel("pressure [MPa]")
+    ax.set_title("Cavity pressure during and after holding")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, framealpha=0.9)
 
     fig.tight_layout()
     fig.savefig(output_path)
@@ -677,6 +922,105 @@ def render_weldlines(
     return output_path
 
 
+def render_flash_risk_map(
+    result: FlowResult,
+    risk,
+    output_path: str | Path,
+    cmap: str = "YlOrRd",
+) -> Path:
+    """The cavity outline (the parting line) coloured by the highest pressure
+    each cell held while its centre was still molten, with the top spots
+    numbered. ``risk`` is a :class:`core.flash.FlashRisk` on the result's grid.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    extent = _base_extent(result)
+    g = result.geometry
+    x0, y0 = g.display_origin_mm()
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=110)
+    _draw_geometry(ax, result)
+
+    mpa = np.asarray(risk.pressure_Pa, dtype=float) / 1e6
+    shown = np.asarray(risk.edge, dtype=bool) & np.isfinite(mpa)
+    top = max(float(mpa[shown].max()), 1.0) if shown.any() else 1.0
+    norm = mcolors.Normalize(vmin=0.0, vmax=top)
+    iy, ix = np.nonzero(shown)
+    # markers, not pixels: the outline is one cell wide and vanishes on a fine grid
+    ax.scatter(
+        (ix + 0.5) * g.cell_size_mm - x0,
+        (iy + 0.5) * g.cell_size_mm - y0,
+        c=mpa[iy, ix],
+        cmap=cmap,
+        norm=norm,
+        marker="s",
+        s=9,
+        linewidths=0,
+        zorder=3,
+    )
+    over = getattr(risk, "over_threshold", None)
+    if over is not None and np.any(over):
+        # the outline at or above the user's threshold: a dark rim round the markers
+        oy, ox = np.nonzero(np.asarray(over, dtype=bool))
+        ax.scatter(
+            (ox + 0.5) * g.cell_size_mm - x0,
+            (oy + 0.5) * g.cell_size_mm - y0,
+            marker="s",
+            s=26,
+            facecolors="none",
+            edgecolors="#4a0d67",
+            linewidths=1.1,
+            zorder=3.5,
+        )
+    # the runner's spots crowd round the gate: they carry their tag only (the
+    # table lists their pressure)
+    labelled = [
+        (f"{k}: {sp.pressure_Pa / 1e6:.0f} MPa", sp, "black")
+        for k, sp in enumerate(risk.spots, start=1)
+    ]
+    labelled += [(f"R{k}", sp, "0.45") for k, sp in enumerate(risk.runner_spots, start=1)]
+    for text, spot, colour in labelled:
+        ax.scatter(
+            spot.x_mm, spot.y_mm, s=180, facecolors="none", edgecolors=colour, lw=1.4, zorder=4
+        )
+        ax.annotate(
+            text,
+            (spot.x_mm, spot.y_mm),
+            # inward, so that a spot on the outline does not put its label off the plot
+            xytext=(8 if spot.x_mm <= 0.0 else -8, 8 if spot.y_mm <= 0.0 else -8),
+            ha="left" if spot.x_mm <= 0.0 else "right",
+            va="bottom" if spot.y_mm <= 0.0 else "top",
+            textcoords="offset points",
+            fontsize=8,
+            zorder=5,
+            bbox={"boxstyle": "round,pad=0.2", "fc": "white", "ec": "0.4", "alpha": 0.85},
+        )
+    _draw_gate_markers(ax, result, color="lime", edgecolor="black")
+
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect("equal")
+    ax.set_xlabel("x [mm]")
+    ax.set_ylabel("y [mm]")
+    ax.set_title("Flash risk on the parting line: pressure on the outline while molten")
+    cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, fraction=0.04, pad=0.02)
+    cbar.set_label("highest pressure while the centre is molten [MPa]")
+    threshold = getattr(risk, "threshold_Pa", None)
+    if threshold is not None:
+        if threshold / 1e6 <= top:
+            cbar.ax.axhline(threshold / 1e6, color="#4a0d67", lw=2.0)
+        ax.plot(
+            [], [], marker="s", ls="none", mfc="none", mec="#4a0d67", mew=1.1,
+            label=f"at or above the threshold ({threshold / 1e6:.0f} MPa)",
+        )  # fmt: skip
+        ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(output_path)
+    plt.close(fig)
+    return output_path
+
+
 def render_skin_layer_map(
     result: FlowResult,
     output_path: str | Path,
@@ -792,6 +1136,15 @@ def render_core_layer_map(
 # --------------------------------------------------------------------------
 
 
+# Upper end of a log colour scale. A melt near the bottom of the Cross-WLF
+# range has a viscosity up to 1e308 Pa·s (inf once frozen). A log axis that
+# reaches that far strides its ticks by tens of decades and puts the next one
+# past the float range, which overflows matplotlib's tick formatter (1e300
+# still does). Anything above 1e100 Pa·s is solid for every purpose here and
+# is drawn in the top colour.
+_LOG_SCALE_CEILING = 1e100
+
+
 def _scalar_layer_field(
     result: MultilayerFlowResult, field: str, layer_idx: int
 ) -> tuple[np.ndarray, str, str]:
@@ -861,7 +1214,16 @@ def render_layer_map(
             log_scale = False
             norm = None
         else:
-            norm = mcolors.LogNorm(vmin=float(valid.min()), vmax=float(valid.max()))
+            vmin = min(float(valid.min()), _LOG_SCALE_CEILING)
+            vmax = min(float(valid.max()), _LOG_SCALE_CEILING)
+            if vmin >= vmax:
+                # Every finite value at or above the ceiling (or one uniform
+                # value) collapses the norm and draws in the bottom colour;
+                # keep one decade below so it draws in the top colour
+                # (Codex P2 on mold-flow-fangate2#15). Frozen cells (inf) stay
+                # blank by design.
+                vmin = vmax / 10.0
+            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
     if not log_scale:
         valid = masked[np.isfinite(masked)]
         if valid.size == 0:
@@ -946,7 +1308,14 @@ def render_layer_grid(
     else:
         vmin = float(valid.min())
         vmax = float(valid.max())
-        if vmin == vmax:
+        if log_scale:
+            vmin = min(vmin, _LOG_SCALE_CEILING)
+            vmax = min(vmax, _LOG_SCALE_CEILING)
+            if vmin >= vmax:
+                # vmax + 1.0 is a no-op at the 1e100 ceiling; keep a decade
+                # instead (Codex P2 on mold-flow-fangate2#15)
+                vmin = vmax / 10.0
+        elif vmin == vmax:
             vmax = vmin + 1.0
     norm = (
         mcolors.LogNorm(vmin=vmin, vmax=vmax)
@@ -1103,7 +1472,7 @@ def export_frames(
     out_paths: list[Path] = []
     try:
         for k, t in enumerate(frames_t):
-            filled = result.fill_time_s <= t
+            filled = filled_at(result, t)
             overlay_im.set_array(_unfilled_overlay(result, filled))
             title_obj.set_text(
                 _fill_title(result, t, filled[g.mask].sum() / max(int(g.mask.sum()), 1))

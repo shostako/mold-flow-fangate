@@ -10,6 +10,7 @@ from .fill_player import (
 from .geometry import Geometry, build_demo_geometry
 from .materials import MaterialDB, cross_wlf_viscosity
 from .multilayer_solver import MultilayerFlowResult, MultilayerHeleShawSolver
+from .packing import PackingReach, packing_reach, summarize_by_thickness
 from .solver import FlowResult, HeleShawSolver
 from .visualizer import (
     draw_gate_markers,
@@ -18,6 +19,7 @@ from .visualizer import (
     fill_frame_times,
     render_core_layer_map,
     render_fill_animation,
+    render_packing_reach_map,
     render_pressure_map,
     render_skin_layer_map,
     render_weldlines,
@@ -42,6 +44,10 @@ __all__ = [
     "FlowResult",
     "render_fill_animation",
     "render_pressure_map",
+    "render_packing_reach_map",
+    "PackingReach",
+    "packing_reach",
+    "summarize_by_thickness",
     "render_weldlines",
     "render_skin_layer_map",
     "render_core_layer_map",

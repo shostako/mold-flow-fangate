@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .pvt import TaitPVT
+
 
 @dataclass(frozen=True)
 class Material:
@@ -36,6 +38,9 @@ class Material:
     # ``thermal_diffusivity_m2_s`` the thermal conductivity is recovered
     # as ``k = α · ρ · cp`` (used for the Brinkman number).
     specific_heat_J_kgK: float = 2400.0
+    # Two-domain Tait pvT (``pvt_tait`` in the JSON). None where the database
+    # has no pvT data: the holding-phase solve needs it and is skipped then.
+    pvt: TaitPVT | None = None
 
     @property
     def thermal_conductivity_W_mK(self) -> float:
@@ -78,6 +83,7 @@ class MaterialDB:
                 density_melt_kgm3=m.get("density_melt_kgm3", 1000.0),
                 thermal_diffusivity_m2_s=m.get("thermal_diffusivity_m2_s", 1.0e-7),
                 specific_heat_J_kgK=m.get("specific_heat_J_kgK", 2400.0),
+                pvt=TaitPVT.from_dict(m["pvt_tait"]) if "pvt_tait" in m else None,
             )
 
     @property
@@ -111,6 +117,14 @@ def cross_wlf_viscosity(
     eta(gamma_dot, T, P) = eta0(T,P) / (1 + (eta0*gamma_dot / tau*)^(1-n))
     eta0(T,P) = D1 * exp(-A1*(T-T*)/(A2_tilde + (T-T*)))
     T* = D2 + D3 * P
+
+    Near and below ``T* − A2_tilde`` the zero-shear viscosity runs past the
+    float range (PA66 reaches it at 164 °C, above its mold temperatures).
+    Evaluated as written, ``eta0`` or ``eta0·gamma_dot`` then overflows and the
+    result comes out NaN (inf/inf) or 0 (finite/inf) -- a frozen layer read
+    as the most fluid one. Where any intermediate would overflow, the
+    viscosity is evaluated in logs instead and is a large finite value or
+    ``inf`` (frozen). Elsewhere the expression is the one above, unchanged.
     """
     T = np.asarray(temperature_K, dtype=float)
     g = np.asarray(shear_rate, dtype=float)
@@ -121,13 +135,28 @@ def cross_wlf_viscosity(
     # numerical guard: 分母が負やゼロにならないようクリップ
     denom = material.A2_tilde + dT
     denom = np.where(denom <= 1e-6, 1e-6, denom)
-    eta0 = material.D1 * np.exp(-material.A1 * dT / denom)
-
     # avoid division by zero in shear rate
     g_safe = np.where(g <= 1e-12, 1e-12, g)
-    ratio = (eta0 * g_safe) / material.tau_star
-    eta = eta0 / (1.0 + ratio ** (1.0 - material.n))
-    return eta
+
+    ln_eta0 = np.log(material.D1) - material.A1 * dT / denom
+    ln_prod = ln_eta0 + np.log(g_safe)  # eta0·gamma_dot, formed before dividing by tau*
+    ln_ratio = ln_prod - np.log(material.tau_star)
+    fits = (ln_eta0 < _LN_SAFE) & (ln_prod < _LN_SAFE) & (ln_ratio < _LN_SAFE)
+    with np.errstate(over="ignore", invalid="ignore"):
+        eta0 = material.D1 * np.exp(-material.A1 * dT / denom)
+        ratio = (eta0 * g_safe) / material.tau_star
+        eta = eta0 / (1.0 + ratio ** (1.0 - material.n))
+        if np.all(fits):
+            return eta
+        # ln eta = ln eta0 − ln(1 + ratio^(1−n)), with the log1p taken stably
+        ln_eta = ln_eta0 - np.logaddexp(0.0, (1.0 - material.n) * ln_ratio)
+        out = np.where(fits, eta, np.exp(ln_eta))
+    return out[()] if out.ndim == 0 else out
+
+
+# Below this exponent nothing in the direct Cross-WLF evaluation overflows a
+# float64 (exp(709.78) is the largest finite value).
+_LN_SAFE = 700.0
 
 
 def representative_shear_rate(injection_velocity_mms: float, thickness_mm: float) -> float:

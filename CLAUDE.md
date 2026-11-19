@@ -3,7 +3,7 @@
 額縁肉厚プレート（外周 t=1 / 内側 t=4）＋ファンゲート＋スプルー直結の射出成形流動解析。
 [mold-flow-sim](../mold-flow-sim) aa96e6c (v0.37.0) を起点に、**別リポ**として立ち上げた（sim 側は触らない）。
 
-## 現状（2026-09-08）
+## 現状（2026-11-19）
 - 形状仕様は `docs/spec.md`、図は `docs/draft/geometry_draft.png`
 - sim の形状非依存モジュールは `core/` に移植済み（v0.1.0）。`geometry.py` は `Geometry` dataclass と
   `build_demo_geometry` のみ
@@ -29,8 +29,18 @@
   スキン層の時計の UI 既定も `constant_rate`（速度制御）に変えた（ライブラリ既定は `constant_pressure` のまま）
 - `tests/test_injection_ui.py` の期待既定値は先頭の定数ブロック（`DEF_METER` / `DEF_SWITCHES` 等）1 箇所に集約してある。
   sim と共有するファイルなので、値を変えるときは `app.py` の定数と両方を直す
+- **解析の中身は mold-flow-fangate2 v0.20.0 にそろえてある（v0.9.0）。** fangate2 との違いは圧縮される所だけ:
+  本リポは製品（額縁 t1＋内側 t4）とタブが同じストロークで一緒に動き（金型は導光板の型の流用で、タブも圧縮ブロック側）、
+  ゲートブロックは動かない。fangate2 は内側 t4 だけ。どちらも `compression_mask` が決め、core は `fan_runner.py` 以外同じ
+  （差は `__init__.py`・`geometry.py` のコメント・`version.py` だけ）。fangate2 の形の機能（Gate 1〜3、7 形状、直接ゲートの多点、
+  遅らせて開くバルブ）は持ち込まない（ユーザーの決定 2026-11-19）。`Geometry.delayed_gates` は空のまま残す
+- 次に fangate2 から取り込むときは、fangate2 の main 682b022（v0.20.0）を祖先にして `git merge-file` で三者マージする。
+  `app.py` は形状の入力の関数（`_fan_gate_sidebar`）に fangate2 の形のウィジェットが衝突なしで紛れるので、元の版と diff して除く。
+  画面の言葉は fangate2 の「ランナ」を本リポの「ゲート側（タブ・ゲートブロック）」に直す
+- 成形方法は先頭のラジオ `molding_method`（既定 通常成形）。保圧（「保圧」の欄）は通常成形だけ、二相ショートショットは射出圧縮成形だけ。
+  射出圧縮成形は射出が終わった瞬間にバルブを閉じるのが基本なので、保圧は考えない（ユーザー 2026-11-19）
 - 次の候補: ゲート形状（＋肉盗み／ウイング）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
-- 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest`
+- 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest -n auto --dist loadscope`
 - Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
   `runtime.txt` は `python-3.12`。deps を変えたら requirements.txt も同期
 

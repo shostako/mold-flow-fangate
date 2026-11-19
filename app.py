@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import re
 import shutil
 import tempfile
@@ -30,27 +31,41 @@ from core import (
     fill_frame_fractions,
     fill_frame_times,
     fill_player_height_px,
+    packing_reach,
     render_3d_fill_time,
     render_3d_pressure,
     render_3d_thickness_map,
     render_core_layer_map,
     render_fill_animation,
+    render_packing_reach_map,
     render_pressure_map,
     render_skin_layer_map,
     render_weldlines,
+    summarize_by_thickness,
     wrap_standalone_html,
 )
+from core.flash import flash_risk
 from core.geometry import Geometry
 from core.injection_profile import InjectionProfile, InjectionStage
+from core.packing_solve import (
+    coarsening_factor,
+    solve_packing_coarsened,
+    summarize_solve_by_thickness,
+)
 from core.settings_record import config_settings, settings_json
 from core.solver import WELD_MIN_ANGLE_DEG
+from core.transient_fill import enclosed_seams
 from core.two_phase import solve_two_phase_short_shot
 from core.version import build_label
 from core.visualizer import (
     ISOCHRONE_LEVELS,
     THICKNESS_CMAP,
     export_two_phase_frames,
+    render_flash_risk_map,
     render_layer_grid,
+    render_packing_late_fill_map,
+    render_packing_pressure_history,
+    render_packing_shrinkage_map,
     render_short_shot_map,
     render_two_phase_animation,
     render_two_phase_map,
@@ -59,22 +74,28 @@ from core.visualizer import (
 
 APP_DIR = Path(__file__).parent
 
-#: Default machine conditions for the screw-side injection block. A real
-#: shot is a screw diameter plus positions and speeds; the rate follows from
-#: them. The previous default -- a flat 589 cm^3/s -- was a spec-sheet
-#: *maximum*, so every condition ran as if the screw were flat out.
+#: Default machine conditions for the screw-side injection block. The rate is
+#: Q = pi*D^2/4 * v; the spec-sheet 589 cm^3/s of the direct input is the
+#: machine's *maximum*, Phi50 x 200 mm/s gives 392.7 cm^3/s.
 DEF_SCREW_DIAMETER_MM = 50.0
 DEF_METERING_POSITION_MM = 140.0
 DEF_VP_POSITION_MM = 18.0
 DEF_SCREW_VELOCITY_MMS = 200.0
 #: Same machine as the sibling repos, but this part is two orders of
 #: magnitude larger, so the metering position is the one setting that
-#: differs: the stroke has to displace the cavity as drawn (plus a margin)
-#: before the volume-to-time map stops extrapolating past V/P. The machine
-#: runs three equal-speed steps -- arithmetically a single stage, kept as
-#: the default because it is what its screen says -- but the switch points
-#: of the other job do not carry over, so the stroke is split evenly.
-DEF_INJECTION_STAGES = 3
+#: differs: once the stage count is 2 or more, the stroke has to displace
+#: the cavity as drawn (plus a margin) before the volume-to-time map stops
+#: extrapolating past V/P.
+#: v0.8.0 (sim v0.55.0): one stage by default. At one speed the metering and
+#: V/P positions only bound a stroke the solver never reads (the shot volume
+#: is the two-phase input, not metering minus V/P), so a single stage asks
+#: for the diameter and the speed and nothing else. The positions, the
+#: switch points and the per-stage speeds appear once the stage count is 2
+#: or more. v0.4.0-v0.7.0 opened on three equal-speed stages.
+DEF_INJECTION_STAGES = 1
+#: The machine's own switch points, pre-filled at ``len(...) + 1`` stages.
+#: The other job's (28 / 22) do not carry over, so none are known here and
+#: every stage count splits the stroke evenly.
 DEF_SWITCH_POSITIONS_MM = ()
 #: Cap on the stage count the UI will unfold. Machines go further; this is
 #: the point past which the sidebar stops being readable.
@@ -87,8 +108,9 @@ GEOMETRY_SOURCE = "Fan gate plate (parametric)"
 st.set_page_config(page_title="額縁プレート ファンゲート 流動解析", layout="wide")
 st.title("額縁プレート ファンゲート 流動解析")
 st.caption(
-    "額縁肉厚プレート（外周薄肉／内側厚肉）をファンゲート＋スプルー直結で射出（圧縮）成形するときの"
-    "樹脂流動を簡易解析するツール。タブ・ゲート形状（ファン／旧ゲート／ウイング）・圧縮条件の方向性検討を、実機評価前の"
+    "額縁肉厚プレート（外周薄肉／内側厚肉）を、ファンゲート＋スプルー直結で通常成形または射出圧縮成形するときの"
+    "樹脂流動を簡易解析するツール。射出圧縮成形では、額縁・内側・タブが同じストロークで一緒に動き、ゲートブロックは動かない。"
+    "タブ・ゲート形状（ファン／旧ゲート／ウイング）・成形条件の方向性検討を、実機評価前の"
     "初期検討段階で迅速に行うことを目的とする。商用 CAE（Moldflow 等）の代替を意図したものではない。"
 )
 
@@ -119,10 +141,18 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.latex(r"-\,\nabla \cdot \left( S\, \nabla \tau \right) = 1 \quad \text{in cavity}")
     st.markdown(
         "- ゲートで $\\tau = 0$（ディリクレ境界）、キャビティ壁で no-flux（ノイマン境界）\n"
-        "- 解いた $\\tau$ を最大値で正規化し、絶対時間に換算: "
-        r"$t_{\text{fill}}(x,y) = \dfrac{\tau(x,y)}{\tau_{\max}} \cdot T_{\text{fill}}$"
-        "\n- $T_{\\text{fill}} = V_{\\text{cavity}} / Q$（射出率一定）\n"
-        "- 多段射出（実機条件モードで段数 2 以上）では $Q$ が段ごとに変わるので、"
+        "- 解いた $\\tau$ は**順序**だけを使い、絶対時間は体積 CDF 写像で与える（v0.25.0）: "
+        "セルの充填時刻 ＝ 総充填時間 × （そのセル以下の $\\tau$ を持つセル群の体積 / 解いた領域の体積）。"
+        "定率射出なら先端は注入体積に比例して進むので、順序を体積で刻むのが物理そのもの\n"
+        r"$t_{\text{fill}}(\mathbf{x}) = T_{\text{fill}} \cdot \dfrac{V(\tau \le \tau(\mathbf{x}))}{V_{\text{solved}}}$"
+        "\n- $V_{\\text{solved}}$ は充填可能なセルの体積。封止で切られた未充填セルは含まないので、"
+        "ショートショット時は最後に届くセルが $T_{\\text{fill}}$ を持つ\n"
+        "- $T_{\\text{fill}} = V_{\\text{solved}} / Q$ は**定率射出・圧縮なし**のとき"
+        "（壁面冷却なし、またはスキン層の「速度制御」時計）。"
+        "射出圧縮成形なら §7 の等価モデルで短縮され、スキン層の「圧力一定」時計と層別の熱結合は"
+        "体積重み付き $\\tau$ の比（抵抗比）で再スケールする — スキン層は膨張のみ、層別は層の粘度分布"
+        "次第で 1 を挟んでどちらにも動く（そのとき $t_{\\text{fill}}$ は $V/Q$ で割った値ではない）\n"
+        "- 多段射出（スクリュー径と射出速度から計算で段数 2 以上）では $Q$ が段ごとに変わるので、"
         "体積 → 時刻の写像が段の切替体積で折れる区分線形になる。"
         "各段の注入体積 $\\pi D^2/4 \\cdot L_i$ は速度によらずストロークだけで決まるので、"
         "折れ点の体積は固定で、傾き（＝射出率）だけが段ごとに変わる\n"
@@ -161,7 +191,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- スキンが出会う年齢 $t_c$ に役務が届いたセル＝**封止**（充填後に閉じた、赤マーク）。閉じた後に届くセルは**未充填**（充填時間なし）"
     )
 
-    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（推奨・極薄向け既定）")
+    st.markdown("### 5. 壁面冷却モデル B：層別 N 層離散化（選択式。二相モデルの射出相にも乗る）")
     st.markdown(
         "厚み方向を $N$ 層に離散化し、**各層に固有の温度・粘度・剪断速度** を持たせる。"
         "スキン層モデルが「壁面凍結フロント」しか扱わないのに対し、こちらは**コア内部の温度・粘度プロファイル**"
@@ -184,8 +214,8 @@ with st.expander("📐 使用している方程式と適用範囲"):
     )
     st.markdown(
         "両壁から育つ熱境界層の重ね合わせ。長時間極限の数値発散を避けるため "
-        r"$T_k \ge T_{\text{mold}}$ で clamp。$t_{\text{arr}}(x,y) = (\tau/\tau_{\max}) \cdot T_{\text{fill}}$"
-        " はセル到達時間。"
+        r"$T_k \ge T_{\text{mold}}$ で clamp。$t_{\text{arr}}(x,y)$"
+        " は §2 の体積 CDF 写像によるセル到達時間。"
     )
 
     st.markdown("**5-3. 層別剪断速度（Poiseuille 解析微分）**")
@@ -195,22 +225,40 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "$\\dot\\gamma_{\\text{floor}} = 0.01 \\cdot 6V/h$ でクリップ。"
     )
 
-    st.markdown("**5-4. 並列流路統合（Poiseuille モーメント積分）**")
-    st.latex(r"S_{\text{total}}(x,y) = \frac{h(x,y)^3}{2} \sum_{k=1}^{N} \frac{m_k}{\eta_k(x,y)}")
+    st.markdown("**5-4. 層の粘度から導通へ（潤滑の積分）**")
     st.latex(
-        r"m_k = \left[\frac{\zeta^2}{2} - \frac{\zeta^3}{3}\right]_{\zeta_{k-1}}^{\zeta_k},"
-        r"\quad \sum_k m_k = \frac{1}{6}"
+        r"S_{\text{total}}(x,y) = \int_0^{h} \frac{(z - h/2)^2}{\eta(z)}\,dz"
+        r" = h(x,y)^3 \sum_{k=1}^{N} \frac{m_k}{\eta_k(x,y)}"
+    )
+    st.latex(
+        r"m_k = \left[\frac{(\zeta - 1/2)^3}{3}\right]_{\zeta_{k-1}}^{\zeta_k},"
+        r"\quad \sum_k m_k = \frac{1}{12}"
     )
     st.markdown(
-        r"$\sum m_k = 1/6$ が保存するので $N=1$ では従来 $S = h^3/(12\eta)$ と厳密一致（後方互換）。"
+        "重みは中央面からの距離の 2 乗で、壁際の層ほど大きい。流速は厚み方向に連続なので、"
+        "壁際の層が粘ると、その内側の層もまとめて遅くなる。"
+        r"粘度が一様なら $S = h^3/(12\eta)$ に戻り、$N=1$ では従来と厳密に一致する。"
+        "v0.10.0 までは層を独立した流路として扱い、等粘度の流速分布 $\\zeta(1-\\zeta)$ で重み付けしていた。"
+        "壁際が固まると導通を大きく見積もる式で、溶けた芯が厚みの割合 $c$ のとき $1.5/c^2 - 0.5$ 倍"
+        "（$c$ = 0.5 で 5.5 倍）になっていた。"
     )
 
-    st.markdown("**5-5. 固定点反復で $\\tau$ と層フィールドを結合**")
+    st.markdown("**5-5. 固定点反復で $\\tau$ と層フィールドを結合（充填の解き方「一発で解く」）**")
     st.markdown(
         r"$\tau \to t_{\text{arr}} \to T_k \to \eta_k \to S_{\text{total}} \to \tau_{\text{new}}$"
         " を $\\|\\Delta\\tau\\|_2 / \\|\\tau\\|_2 < $ tol まで反復。"
         "発散時のみ $\\omega = 0.7$ で適応的 damping。**ショートショット判定**は最終 iteration の中央層温度ベース:"
         r" $T_{\text{solid}} = T_{\text{mold}} + f_{\text{solid}} (T_{\text{melt}} - T_{\text{mold}})$。"
+    )
+
+    st.markdown("**5-6. 先端を時間で進める（充填の解き方「時間で追う」、既定）**")
+    st.markdown(
+        "固定点の代わりに、射出した量だけ先端を時間で進める。満杯のセルの圧力を解き、"
+        "満杯のセルに接する先端のセル（$p = 0$）を流入で満たす。刻みごとに、機械が送った量がちょうどゲートから出ていく。"
+        "各セルの層は樹脂が着いた時刻 $t_{\\text{arr}}$ で読む（5-2〜5-4 の式は同じ）。"
+        "到着時刻は因果的に決まるので反復は無い。総充填時間は射出率どおり（体積 ÷ 射出率。射出圧縮成形では §7 の短縮込み）になる。"
+        "「一発で解く」は $\\tau$ の大小で充填の順番を決めるので、厚い所を満たしきってから薄い所に入る。"
+        "「時間で追う」は、厚い所が埋まりきる前に、先端が届いた薄い所へも入る。"
     )
 
     st.markdown("### 6. 剪断発熱（viscous dissipation, 段階1）")
@@ -226,8 +274,9 @@ with st.expander("📐 使用している方程式と適用範囲"):
     st.markdown(
         "$\\tau_{\\text{thermal}}$ は厚み方向 1D 拡散の最低モード時定数で頭打ち。"
         "実態は **粘性散逸 vs 1D 壁面冷却** の準定常バランス近似。"
-        " $T_k \\leftarrow T_{k,\\text{Neumann}} + \\Delta T_{\\text{shear},k}$ で Cross-WLF を再評価、"
-        "粘度低下→流動加速→発熱低下の負のフィードバックは fixed-point 反復で自然収束。"
+        " $T_k \\leftarrow T_{k,\\text{Neumann}} + \\Delta T_{\\text{shear},k}$ で Cross-WLF を再評価する。"
+        "$\\eta_k$ は加熱後の $T_k$ で読み、$\\Delta T_{\\text{shear},k}$ と自己整合させてセルごとに解く"
+        "（上昇が大きいほど $\\eta_k$ が下がり発熱が減るので、解は 1 つに決まる）。"
     )
 
     st.markdown("**Brinkman 数（剪断発熱の必要性診断、補正 OFF でも常時計算）**")
@@ -272,6 +321,124 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- $f_{\\text{cmp}}$: 充填占有率（圧縮開始時にキャビティ何%まで充填されているか）"
     )
 
+    st.markdown("### 8. 保圧が届く時間（見積り、通常成形のとき）")
+    st.markdown(
+        "保圧の流れは解かない。充填の結果から、**ゲートからその場所まで溶けた通り道がいつまで残るか**だけを読む。"
+        "温度の扱いは 5-2 と同じで、充填の終わりにそのセルにいる樹脂は、到達時刻 $t_{\\text{arr}}$ だけ"
+        "金型温度の壁にはさまれて冷えている。充填のあとは流れを止め、同じ板の熱伝導で冷やす。"
+    )
+    st.latex(
+        r"t_f(h) = \mathrm{Fo}^* \, \frac{h^2}{\alpha}, \qquad "
+        r"s = \max\bigl(t_f(h) - t_{\text{arr}},\, 0\bigr), \qquad "
+        r"R(x) = \max_{\text{path}:\,\text{gate} \to x} \; \min_{c \,\in\, \text{path}} s(c)"
+    )
+    st.markdown(
+        "- $t_f(h)$: 厚さ $h$ の板の中心が固化温度 $T_{\\text{mold}} + f\\,(T_{\\text{melt}} - T_{\\text{mold}})$ まで下がる樹脂の年齢。"
+        "$\\mathrm{Fo}^*$ は両面冷却の板の厳密解（級数）から求める（$f = 0.3$ で 0.1465）。**厚さの 2 乗に比例する**\n"
+        "- $s$: 充填の終わりから数えて、そのセルの中心が固まるまでの時間（0 ＝ 充填の終わりに固まっている）\n"
+        "- $R$: 保圧が届く時間。通り道は、その上でいちばん早く固まるセルと同じだけもつ。"
+        "いちばん長くもつ通り道を取る（ゲートは固まらないとする）\n"
+        "- 割合 $R / s$: そのセルが固まるまでの時間のうち、保圧が届いている割合\n\n"
+        "見ていないもの: 保圧中に流れ込む樹脂の熱（入れると $R$ は延びる）、充填中にゲートの近くの壁にできる固化層"
+        "（入れると縮む）、固化層で通り道が狭くなること、樹脂の縮み（pvT）。2 つの効果は逆向きなので秒は目安で、"
+        "形どうしの順位と比に使う。射出圧縮成形のときは出さない。"
+    )
+
+    st.markdown("### 9. 保圧の計算（通常成形で「保圧を解く」が ON のとき）")
+    st.markdown(
+        "体積の VP 切替の充填率まで射出率で埋めた時点から、ゲートを保圧 $P_h$ で保持時間 $t_h$ だけ保持し、"
+        "そのあとゲートを閉じる。樹脂は縮む（密度は圧力と温度で決まる）ので、保圧のあいだ樹脂が流れ込み続ける。"
+        "セル（面積 $A$、厚さ $h$）の質量の保存を、時間を追って解く。"
+    )
+    st.latex(
+        r"\frac{\partial}{\partial t}\bigl(\bar\rho(p)\, h\bigr) = "
+        r"\nabla \cdot \bigl(\rho\, S\, \nabla p\bigr), \qquad "
+        r"S = \int_{-h/2}^{h/2} \frac{z^2}{\eta(T(z),\, \tau)}\, dz, \qquad \tau = |\nabla p|\,|z|"
+    )
+    st.latex(
+        r"v(T, p) = v_0(T)\left[1 - C \ln\!\left(1 + \frac{p}{B(T)}\right)\right], \qquad "
+        r"S_v = 1 - \frac{M\, v(T_{\text{room}},\, 0)}{A\, h}"
+    )
+    st.markdown(
+        "- $\\bar\\rho(p)$: 厚さで平均した密度。厚さ方向の温度は §8 と同じ板の冷え方（樹脂の年齢 $t_{\\text{arr}} + t$）で、"
+        "各深さの密度を 2 領域 Tait の pvT（$v$ は比容積、$C = 0.0894$）から出す\n"
+        "- $S$: 流れやすさ。各深さの Cross-WLF 粘度を、その場の剪断応力 $\\tau$ で下げて積分する。"
+        "固化温度より冷えた層は流れない。**通り道が冷えて細るほど、保圧は届かなくなる**\n"
+        "- 圧力は 0 より下がらない。質量が足りなくなったセルは壁から離れた（引けた）とみなし、圧力 0 のまま不足分を持つ\n"
+        "- **VP 切替**: 充填の到達時刻の順に体積を積み、切替の充填率に達した時刻を切替とする。そこまでに樹脂が届いた"
+        "セルは満杯、残りは空として始め、空のセルは満杯の隣から樹脂を受け取って埋まる。100 % にすると、全部埋まった"
+        "ものとして保圧だけを解く\n"
+        "- **機械が送る量の上限**: 保圧に切り替えても、機械は射出率より速くは送れない。保圧では上限を超える間は、"
+        "送る量がちょうど上限になるゲートの圧力を刻みごとに探し、保圧より低く保つ\n"
+        "- $S_v$: 室温・大気圧まで冷えたあとの体積の縮み。$M$ は流れが止まったときのセルの質量。"
+        "負は詰め込みすぎ（成形品がキャビティより大きくなる側）\n\n"
+        "入っていないもの: ノズル・ホットランナー・スプルーの圧力損失（保圧はゲート（スプルーの足の円）の位置の圧力として扱う）、"
+        "保圧中に流れ込む樹脂が運ぶ熱、型のたわみ、粘度の圧力依存、切替の時点の圧力分布（満杯のセルは一様な 1 MPa から始める）。"
+        "pvT データのある材料（PMMA）でだけ解く。既定は充填と同じ格子で解き、「保圧を粗い格子で解く（検算用）」で"
+        "2 万マス以下にまとめて解ける。"
+    )
+    st.warning(
+        "**（層の温度を到達時刻から読む方のとき）薄い所が保圧で埋まるかの判定は当てにならない。** 厚さ方向の温度を解かず、"
+        "「樹脂がそこにあった時間」と「その場所の肉厚」だけで決めている。切替の時点で空のセルにあとから入る樹脂も、"
+        "充填の開始からその場所の肉厚で冷えてきたものとして扱うので、1 mm の額縁のような薄い所は、厚い所を通ってきた"
+        "熱い樹脂が入る場合でも、最初から固まっている扱いになり、埋まらないと出る。厚い所の縮みと圧力は、"
+        "形どうしの比較に使える。市販の解析（充填と保圧を通してエネルギーの式を解く）との大きな違いはここにある。"
+        "層の温度を「刻みごとに解く」にすると、§10 の温度を切替の時点から保圧へ渡すので、この弱点は無くなる。"
+    )
+
+    st.markdown("### 10. 層の温度を刻みごとに解く（層別・時間で追う解き方で選んだとき）")
+    st.markdown(
+        "厚さの半分を 16 層（Gauss 点）に分け、各層の温度 $\\theta = (T - T_{\\text{mold}}) / (T_{\\text{melt}} - T_{\\text{mold}})$ を"
+        "マスごとの状態として持ち、充填の刻みごとに 3 つの効果を順に足す。"
+    )
+    st.latex(
+        r"\frac{\partial \theta}{\partial t} = \alpha \frac{\partial^2 \theta}{\partial z^2}"
+        r" \;-\; \underbrace{\nabla\!\cdot(\mathbf{q}_k\, \theta_k)}_{\text{流れが運ぶ熱}}"
+        r" \;+\; \frac{\text{剪断の仕事}}{\rho c_p\, \Delta T}"
+    )
+    st.markdown(
+        "- **壁への熱伝導**: 樹脂の表面と金型の間に熱伝達係数 $h_c$ を置く（表面の熱の流れ $= h_c\\,(T_{\\text{表面}} - T_{\\text{金型}})$）。"
+        "充填・保圧・壁から離れたあと（保圧中に圧力が 0 になり、質量が足りなくなったマス）の 3 つで値を替える。既定は "
+        "5000／2500／1250 W/(m²·K) で、Moldflow の既定と同じ。効き方はビオ数 $Bi = h_c h / k$ で決まり、薄い所ほど小さく、"
+        "冷えるのが遅くなる（PMMA の 1 mm で充填中 $Bi \\approx 25$）。「表面＝金型温度」を選ぶと $h_c \\to \\infty$（v0.15 までの扱い）。"
+        "熱伝導の行列を固有分解して持ち、刻みの長さによらず厳密に進める（ビオ数は 2 % 刻みでまとめる）\n"
+        "- **流れが運ぶ熱**: 面を通った樹脂の量を、層ごとの流量の配分（固まった層は 0）で分け、上流の層の温度を運ぶ。"
+        "先端が入るマスは、入ってくる樹脂の流量平均の温度をすべての層に入れる（ファウンテンフロー）。ゲートからは溶融温度\n"
+        "- **剪断発熱**: 面ごとの「流量 × 圧力差」を両側のマスに抵抗の比で分けて、層ごとの発熱にする。合計は圧力の仕事"
+        "（ゲート圧 × 送った体積）と一致する\n"
+        "- **流れやすさ**: その場所の流量から壁の剪断応力を解き、Cross-WLF の粘度を層ごとに下げて積分する"
+        "（代表流動速度は使わない）\n"
+        "- **射出圧の上限**: ゲートの圧力が上限に達すると流量が落ちる。流れが止まれば、そこで充填を止める。"
+        "止まった理由は結果の先頭に出す: 上限に達して流量が落ちたのか、上限で流量が落ちる前に残りへ入る所のマスが中心まで固まったのか"
+        "（どちらとも示せないときは、そう書く）。"
+        "\n"
+        "- **先端のマス**: 流れやすさは、そのマスに入っている樹脂の温度で決める。先に少し入って固まったマスは、"
+        "その樹脂を送ってきた隣のマスからは、もう入れない（先に入った樹脂を押して進むことになる）。"
+        "別の向きから後で届いた先端は、マスの空いた側に当たるので、入ってくる樹脂の温度と、そのマスの肉厚で決めた流れやすさで入る"
+        "（先端のマスが樹脂を受け始めたあとに満ちた隣のマスを、後から届いた先端とみなす）。"
+        "この扱いが無いと、先に止まって固まった先端と後から来た先端の合わせ目に、幅 1 マスの線が埋まらずに残る\n"
+        "- **保圧へ**: VP 切替の時点の状態をそのまま保圧の計算（§9）へ渡し、保圧中も同じ 3 つの効果を刻みごとに解く\n\n"
+        "入っていないもの: 面内（板の広がる向き）の熱伝導、金型の中の温度の分布（金型の表面は一様に金型温度）、"
+        "射出圧縮成形との組み合わせ（射出圧縮成形では到達時刻から読む方で解く）。"
+        "格子は 2 mm 以下で使う。4 mm 格子は軸に対して左右対称に切れず、流れが集まる通り道が片側に寄って、結果が左右で違って出る。"
+        "熱伝導と運びは刻みの中で小分けにして解く（1 刻みにマスを通り過ぎる流れで冷えすぎないように）。\n\n"
+        "**薄いゲート（入口 1 mm のファン、2 mm のタブなど）の読み方**: 保圧のあいだ流れ続ける樹脂が熱を運ぶので、"
+        "薄い首は開いたままになりやすく、ゲートの形による縮みの差が小さく出る。到達時刻から読む方は逆に、首が保圧の初めに"
+        "固まる扱いで差が大きく出る。試作の重量で確かめるまで、答えは 2 つの間にあると読む。"
+    )
+
+    st.markdown("### 11. バリ注意（PL、保圧を解いたとき）")
+    st.markdown(
+        "キャビティの輪郭（製品とゲート側（タブ・ゲートブロック）の外周のマス）を PL の合わせ目とみなし、輪郭の各マスについて、"
+        "厚さの中心が溶けている間に受けた最大の圧力 $p_{\\text{molten}} = \\max_{t < t_{\\text{freeze}}} p(t)$ を出す。"
+        "固まったあとの圧力は数えない（固まった樹脂はすき間に入らない）。製品の輪郭とゲート側の輪郭は別々に順位を付け、"
+        "上位から 20 mm 以上離れた所を 5 か所ずつ選ぶ。型を開く力（$\\int p\\, dA$ の最大）と機械の型締力も並べる。\n\n"
+        "入っていないもの: すき間の深さ（ベント・摩耗）、型のたわみ、すき間に入る樹脂の流れ。何 MPa でバリが出るかは型ごとに判断する。"
+        "試作でバリが出始めた所の圧力が分かったら、保圧の欄の「バリの目安の圧力」に入れる。その圧力以上の輪郭に紫の枠が付き、長さが出る"
+        "（空欄なら線は引かない。既定の値は持たない）。"
+        "層の温度を到達時刻から読む方では、薄い額縁が切替の時点で固まった扱いになり、製品の輪郭が低く（0 に）出る。"
+    )
+
     st.markdown("---")
     st.markdown("### ✅ モデル化している現象")
     st.markdown(
@@ -285,7 +452,12 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- **剪断発熱（段階1, 層別モード内）**: 粘性散逸による局所温度上昇、Brinkman 数診断\n"
         "- **ショートショット予測**: スキン層モデルでは露光時計の封止（$t_{\\text{close}} = t_{\\text{arr}} + t_c$）で切られたセル、"
         "層別モデルでは中央層温度ベース判定\n"
-        "- 射出圧縮成形による等価流路拡大（stroke モード、CLI に factor 後方互換あり、オプション）"
+        "- 射出圧縮成形による等価流路拡大（stroke モード、CLI に factor 後方互換あり、オプション）\n"
+        "- **保圧が届く時間の見積り**（通常成形のとき）: 充填のあと流れを止めて冷やし、ゲートからの溶けた通り道が残る時間を読む\n"
+        "- **保圧の計算**（通常成形で「保圧を解く」ON、pvT のある材料）: 圧力の時間変化、保圧で入る樹脂の量、"
+        "体積の縮み、型を開く力（§9）\n"
+        "- **層の温度を刻みごとに解く**（選んだとき）: 熱伝導・流れが運ぶ熱・剪断発熱を厚さ 16 層で、充填から保圧まで通して解く（§10）\n"
+        "- **バリ注意（PL）**（保圧を解いたとき）: 輪郭が溶けている間に受けた最大の圧力、型を開く力と機械の型締力（§11）"
     )
 
     st.markdown("### ❌ モデル化していない現象（重要）")
@@ -295,15 +467,16 @@ with st.expander("📐 使用している方程式と適用範囲"):
         "- **剪断発熱の自己整合（段階2）**: 段階1 は閉形式の局所近似のみ。"
         r"$\rho c_p \partial_t T = k \partial_z^2 T + \eta \dot\gamma^2$ を厚み方向 1D FDM で陰解法積分する"
         "段階2 は別ロードマップ。$Br \\ge 2$ 領域では段階1 がズレる\n"
-        "- **保圧（パッキング段階）**: 充填までしかモデル化しない\n"
-        "- **収縮・反り・残留応力**: 熱固化収縮も結晶化も入っていない\n"
+        "- **保圧中の熱と型のたわみ**: §9 の保圧の計算は、流れ込む樹脂が運ぶ熱、型のたわみ、"
+        "ノズル・ホットランナー・スプルーの圧力損失を入れていない\n"
+        "- **反り・残留応力**: 体積の縮み（§9）までで、縮みの向き・反り・残留応力は出ない。結晶化も入っていない\n"
         "- **層内対流項**: 1D Neumann は純粋拡散のみ（薄板では妥当な近似だが、極厚 $h > 4$ mm では破綻）\n"
         "- **ベント・脱気挙動**: エアトラップ位置は予測するが圧抜けは考慮しない\n"
         "- **スプルーブッシュの圧損**: スプルーは足の径 φ の円を射出点として扱い、縦チャネルの抵抗は入っていない\n"
         "- **STL/STEP 直接読み込み**: パラメトリック形状（額縁プレート＋ファンゲート）のみ\n"
         "- **非構造格子・中立面メッシュ**: 構造格子（正方形セル）固定\n"
-        "- **絶対圧力場の出力**: 圧力は正規化値（ゲート=1 / フロント=0）のみ。"
-        "実機の必要型締力評価には未対応"
+        "- **充填中の絶対圧力場**: 充填の圧力マップは正規化値（ゲート=1 / フロント=0）のみ。"
+        "充填中の必要型締力は出ない（保圧中の型を開く力は §9 で出る）"
     )
 
     st.markdown("### 用途と適用範囲")
@@ -325,7 +498,7 @@ with st.expander("📐 使用している方程式と適用範囲"):
 # Bump this string when you add/remove fields on `core.materials.Material`.
 # The parameter must NOT start with an underscore: Streamlit leaves
 # underscore-prefixed arguments out of the cache hash (Codex P2, PR #5).
-_MATERIAL_DB_SCHEMA_VERSION = "v2_shear_heating"
+_MATERIAL_DB_SCHEMA_VERSION = "v3_pvt"
 
 
 @st.cache_resource
@@ -336,6 +509,36 @@ def _load_db(schema_version: str = _MATERIAL_DB_SCHEMA_VERSION) -> MaterialDB:
 db = _load_db()
 material_keys = list(db.keys())
 
+# 「保圧が届く時間」を出さないときに結果ペインへ出す理由
+PACK_SKIP_ICM = (
+    "射出圧縮成形の解析では出しません（圧縮が保圧の役をし、"
+    "キャビティの厚さも充填中に変わるため）。"
+    "成形方法を通常成形にして解析すると出ます。"
+)
+PACK_SKIP_FRACTION = (
+    "固化判定 fraction が 0 のときは出しません（厚さの中心が金型温度まで下がる時刻は"
+    "決まらないため）。0 より大きい値で解析すると出ます。"
+)
+
+
+# 保圧の計算を解かないときに結果ペインへ出す理由
+HOLD_SKIP_OFF = "サイドバー「保圧」で「保圧を解く」を ON にして解析すると出ます。"
+HOLD_SKIP_ICM = (
+    "射出圧縮成形の解析では解きません（圧縮が保圧の役をし、キャビティの厚さも充填中に変わるため）。"
+)
+HOLD_SKIP_PVT = "この材料には pvT データが無いので解けません（pvT があるのは PMMA）。"
+HOLD_SKIP_SHORT = "充填が全体に届いていない（ショートショット）ので解きません。"
+# VP 切替のあと保圧で埋める計算の、いちばん大きい弱点。結果ペインに必ず出す
+HOLD_THIN_CAVEAT = (
+    "薄い所（1 mm の額縁など）が保圧で埋まるかの判定は当てにならない。切替のあとに入る樹脂の"
+    "温度を、充填の開始からその場所の肉厚で冷えてきたものとして決めているので、厚い所を"
+    "通ってきた熱い樹脂でも、薄い所では最初から固まっている扱いになる。"
+    "そのため、薄い所は実際より埋まりにくく出る。厚い所の縮みと圧力の比較には使える。"
+)
+# 保圧の計算に使うセル数の上限。これを超える格子は、保圧だけ粗い格子に写して解く
+# （直接法の連立方程式を 1 刻みに何度も解くので、セル数で時間が決まる）。
+HOLD_MAX_CELLS = 20_000
+
 
 # ----------------------- fan-gate plate: parametric inputs -----------------------
 _D = FanGatePlateConfig()  # spec defaults (docs/spec.md)
@@ -344,6 +547,10 @@ _GATE_LABELS = {
     "旧ゲート（タブゲート）": "old",
     "ウイングゲート": "wing",
 }
+#: 成形方法: the sidebar's first choice
+# the first one is the default: conventional molding (fangate2 v0.19.0)
+MOLDING_METHODS = ("conventional", "icm")
+_MOLDING_LABELS = {"icm": "射出圧縮成形", "conventional": "通常成形"}
 
 
 def _fan_gate_sidebar() -> dict:
@@ -609,14 +816,26 @@ def _injection_error_ja(message: str) -> str:
 
 def _injection_rate_inputs(
     mode: str,
-) -> tuple[InjectionProfile | None, float | None, str | None]:
-    """The rate half of the injection block: a screw profile, or a flat Q.
+) -> tuple[InjectionProfile | None, float | None, str | None, dict | None]:
+    """The rate half of the injection block: a flat Q, or one from the screw.
 
-    Returns ``(profile, Q_cm3s, error)``. Exactly one of the first two is set
-    when ``error`` is None. On a rejected machine condition both are None and
-    ``error`` carries the message -- the caller stops the run rather than
-    this function calling ``st.stop()``, which sits above the version caption
-    and would take it off the screen with the error still on it.
+    Returns ``(profile, Q_cm3s, error, machine)``. Exactly one of the first
+    two is set when ``error`` is None. ``machine`` is the screw-side record
+    for settings.json (None on the direct rate).
+
+    - ``direct``: the rate slider.
+    - ``machine``, one stage (the default): screw diameter and speed only,
+      ``Q = pi*D^2/4 * v`` handed to the solver as a flat rate. A single
+      speed has no switch to place, and the stroke between metering and V/P
+      does not set how much resin goes in (that is the two-phase shot
+      volume), so the positions are not asked for.
+    - ``machine``, two stages or more: metering and V/P positions, the switch
+      points and a speed per stage build an ``InjectionProfile``.
+
+    On a rejected machine condition the first two are None and ``error``
+    carries the message -- the caller stops the run rather than this function
+    calling ``st.stop()``, which sits above the version caption and would take
+    it off the screen with the error still on it.
 
     The stage widgets are laid out with static bounds (the metering and V/P
     positions of the run) and the ordering is checked afterwards instead of
@@ -633,10 +852,10 @@ def _injection_rate_inputs(
             589.0,
             step=1.0,
             key="inj_Q_direct",
-            help="ソディック等の成形機取説の射出率に対応。"
-            "取説の値は機械の最大射出率なので、実際より速く充填されることがある。",
+            help="成形機の取説の射出率をそのまま使う。取説の値は機械の最大射出率なので、"
+            "実際より速く充填される。実機に合わせるなら「スクリュー径と射出速度から計算」。",
         )
-        return None, float(Q), None
+        return None, float(Q), None, None
 
     screw_d = st.number_input(
         "スクリュー径 [mm]",
@@ -647,6 +866,38 @@ def _injection_rate_inputs(
         key="inj_screw_d",
         help="バレル内でスクリューが押しのける断面の直径。Q = πD²/4 × v。",
     )
+    n_stages = int(
+        st.number_input(
+            "射出段数",
+            min_value=1,
+            max_value=MAX_INJECTION_STAGES,
+            value=DEF_INJECTION_STAGES,
+            step=1,
+            key="inj_num_stages",
+            help="1 なら射出速度だけで射出率が決まる。2 以上にすると計量位置・"
+            "V/P切替位置・各段の速度切替位置と速度の欄が出る。",
+        )
+    )
+    area_mm2 = math.pi * float(screw_d) ** 2 / 4.0
+
+    if n_stages == 1:
+        v = float(
+            st.number_input(
+                "射出速度 [mm/s]",
+                min_value=0.1,
+                max_value=1000.0,
+                # Coming back from several stages, start from the first
+                # stage's speed rather than the default.
+                value=float(st.session_state.get("inj_velocity_0", DEF_SCREW_VELOCITY_MMS)),
+                step=1.0,
+                key="inj_velocity",
+                help="スクリューの前進速度（成形機の画面の射出速度）。",
+            )
+        )
+        Q = area_mm2 * v / 1000.0
+        st.caption(f"射出率: **{Q:.1f} cm³/s**（π × {float(screw_d):g}² / 4 × {v:g} mm/s）")
+        return None, Q, None, {"screw_diameter_mm": float(screw_d), "stages": 1, "velocity_mms": v}
+
     meter_pos = st.number_input(
         "計量位置 [mm]",
         min_value=0.5,
@@ -665,18 +916,7 @@ def _injection_rate_inputs(
         key="inj_vp_pos",
         help="速度制御から保圧に切り替わる位置。ここまでが充填。",
     )
-    n_stages = int(
-        st.number_input(
-            "射出段数",
-            min_value=1,
-            max_value=MAX_INJECTION_STAGES,
-            value=DEF_INJECTION_STAGES,
-            step=1,
-            key="inj_num_stages",
-            help="1 なら計量位置から V/P まで一定速度。2 以上にすると"
-            "各段の速度切替位置と速度の欄が出る。",
-        )
-    )
+    machine = {"screw_diameter_mm": float(screw_d), "stages": n_stages}
 
     if vp_pos >= meter_pos:
         return (
@@ -686,19 +926,19 @@ def _injection_rate_inputs(
                 f"V/P切替位置 ({vp_pos:g} mm) が計量位置 ({meter_pos:g} mm) 以上です。"
                 "スクリューは前進するので、V/P は計量位置より小さい必要があります。"
             ),
+            machine,
         )
 
     # Only the boundaries between stages are asked for; the last stage always
     # ends at V/P, which is what makes it the V/P transfer. Defaults are the
-    # machine's own switch points at the default stage count, an even split of
-    # the stroke otherwise.
+    # machine's own switch points at the stage count it is set up in, an even
+    # split of the stroke otherwise.
     span = meter_pos - vp_pos
     switches: list[float] = []
     for i in range(n_stages - 1):
         default = meter_pos - span * (i + 1) / n_stages
         if (
-            n_stages == DEF_INJECTION_STAGES
-            and i < len(DEF_SWITCH_POSITIONS_MM)
+            n_stages == len(DEF_SWITCH_POSITIONS_MM) + 1
             and vp_pos < DEF_SWITCH_POSITIONS_MM[i] < meter_pos
         ):
             # The machine's own switch points, as long as they still sit
@@ -716,13 +956,16 @@ def _injection_rate_inputs(
                 )
             )
         )
+    # A new stage starts at the single-stage speed the user had, so going
+    # from one stage to several keeps the speed instead of resetting it.
+    v_seed = float(st.session_state.get("inj_velocity", DEF_SCREW_VELOCITY_MMS))
     velocities = [
         float(
             st.number_input(
                 f"第{i + 1}段 射出速度 [mm/s]",
                 min_value=0.1,
                 max_value=1000.0,
-                value=DEF_SCREW_VELOCITY_MMS,
+                value=v_seed,
                 step=1.0,
                 key=f"inj_velocity_{i}",
             )
@@ -748,6 +991,7 @@ def _injection_rate_inputs(
                 "速度切替位置は計量位置から V/P 位置へ向かって降順に並べてください"
                 "（最終段は V/P 位置で終わります）。"
             ),
+            machine,
         )
 
     lines = [
@@ -755,13 +999,12 @@ def _injection_rate_inputs(
         f"射出時間 (V/P まで): **{profile.total_time_s:.3f} s**",
         f"理論射出量 (V/P 時点): **{profile.total_volume_cm3:.2f} cm³**",
     ]
-    if profile.num_stages > 1:
-        for i, (rate, t, vol) in enumerate(
-            zip(profile.stage_rates_cm3s(), profile.stage_times_s(), profile.stage_volumes_mm3())
-        ):
-            lines.append(f"　第{i + 1}段: {rate:.1f} cm³/s / {t:.3f} s / {vol / 1000.0:.2f} cm³")
+    for i, (rate, t, vol) in enumerate(
+        zip(profile.stage_rates_cm3s(), profile.stage_times_s(), profile.stage_volumes_mm3())
+    ):
+        lines.append(f"　第{i + 1}段: {rate:.1f} cm³/s / {t:.3f} s / {vol / 1000.0:.2f} cm³")
     st.caption("  \n".join(lines))
-    return profile, None, None
+    return profile, None, None, machine
 
 
 def build_geometry(v: dict) -> tuple[Geometry, dict]:
@@ -783,6 +1026,20 @@ with st.sidebar:
         st.header("成形品設計")
     with _run_col:
         do_run = st.button("解析実行", type="primary", use_container_width=True)
+    molding_method = st.radio(
+        "成形方法",
+        MOLDING_METHODS,
+        format_func=_MOLDING_LABELS.__getitem__,
+        key="molding_method",
+        horizontal=True,
+        help="通常成形は型を閉じたまま充填する。保圧の計算と、層の温度を刻みごとに解く充填は通常成形だけで、"
+        "「保圧」の欄も通常成形のときだけ出る。"
+        "射出圧縮成形は、型を少し開いたまま充填して、あとから閉じる。圧縮されるのは製品（額縁と内側の厚肉部）"
+        "とタブで、同じストロークで一緒に動く。ゲートブロック（ファン／旧ゲート／ウイング・井戸・スプルー）は固定。"
+        "条件は下の「射出圧縮成形 (ICM)」で決める。"
+        "「ショートショット（計量制限）」の二相の解析は、射出圧縮成形のときだけ出る。",
+    )
+    icm = molding_method == "icm"
     fan_inputs = _fan_gate_sidebar()
 
     with st.expander("材料", expanded=False):
@@ -825,23 +1082,27 @@ with st.sidebar:
         )
         inj_mode = st.radio(
             "射出率の指定",
-            options=("machine", "direct"),
-            index=0,
+            options=("direct", "machine"),
+            # 既定はスクリュー径と射出速度から計算（Φ50 × 200 mm/s、単段 = 392.7 cm³/s）。
+            # v0.8.0 で sim v0.55.0・v0.57.0 に揃えた。v0.4.0〜v0.7.0 は同じ計算側の
+            # 3 段（全段同速）が既定だった。直接入力の 589 は取説の最大射出率。
+            index=1,
             key="inj_mode",
             format_func=lambda m: {
-                "machine": "実機条件から計算（スクリュー径・位置・速度）",
                 "direct": "射出率を直接入力",
+                "machine": "スクリュー径と射出速度から計算",
             }[m],
-            help="実機条件: Q = πD²/4 × v。成形機に実際に入れる数字から射出率と"
-            "V/P までの射出時間を出す。直接入力: 取説の射出率をそのまま使う。",
+            help="直接入力: 取説の射出率（機械の最大値）をそのまま使う。"
+            "スクリュー径と射出速度から計算: Q = πD²/4 × v。射出段数を 2 以上にすると"
+            "計量位置・V/P切替位置・各段の速度を入れる多段射出になる。",
         )
-        inj_profile, inj_Q, inj_error = _injection_rate_inputs(inj_mode)
+        inj_profile, inj_Q, inj_error, inj_machine = _injection_rate_inputs(inj_mode)
 
     with st.expander("壁面冷却モデル", expanded=False):
         wall_model = st.radio(
             "壁面冷却の表現",
             options=("none", "skin", "multilayer"),
-            index=1,
+            index=2,
             key="wall_model",
             format_func=lambda m: {
                 "none": "なし（等温・代表粘度のみ）",
@@ -854,20 +1115,25 @@ with st.sidebar:
                 "コア層 h_core=h-2s だけが流れる（露光時計、役務平均）。封止と未充填も検出。\n"
                 "層別: 厚み方向を N 層に分割、Neumann 1D 温度プロファイルから "
                 "層別粘度を Cross-WLF で評価。fixed-point で τ ↔ T_k ↔ η_k を結合。\n"
-                "極薄プレート (t<0.5mm) では層別を推奨。"
+                "既定は層別（N=7）。温度まで効くのは層別だけ。スキン層・層別とも二相"
+                "ショートショットの射出相に乗る。"
             ),
         )
 
         # default container (so downstream `solver = HeleShawSolver(...)` /
         # `MultilayerHeleShawSolver(...)` always has the kwargs it expects).
-        # 既定モードは『スキン層』(index=1) — 既定 ON の二相ショートショットと併用でき、
-        # 射出相で薄い額縁が痩せる順番まで出る（層別は二相と併用不可）。
+        # 既定モードは『層別』(index=2、v0.8.0、sim v0.50.0 の横展開)。v0.1.0〜v0.7.0 は
+        # 『スキン層』(index=1)だった。層別は v0.8.0（sim v0.48.0）から二相ショートショットの
+        # 射出相に乗るので、既定 ON の二相と両立する。『なし』は η が定数で
+        # S ∝ h³ になり、材料も温度も充填順序に効かない（形状と Q だけで決まる）。
+        # スキン層で効くのは材料の熱拡散率 α（s = c·√(αt)）で、T_melt / T_mold は
+        # 依然として効かない — 温度まで効かせるには層別。
         # 層別を選んだときの既定値 (極薄 t0.35〜0.50 向け):
         #   層数 N: 7 (壁勾配が急なので N=5 から増量)
         #   反復上限: 12 (収束が遅くなりがちなので上限緩め)
         skin_on = wall_model == "skin"
         c_skin = 0.0
-        skin_max_iter = 5
+        skin_max_iter = 20
         skin_tol = 1e-3
         skin_clock_mode = "constant_pressure"
         multilayer_on = wall_model == "multilayer"
@@ -876,6 +1142,11 @@ with st.sidebar:
         multilayer_max_iter = 12
         multilayer_tol = 1e-3
         solid_fraction = 0.3
+        fill_method = "tau"
+        thermal_model = "arrival"
+        inj_p_limit_mpa = 280.0
+        wall_contact_model = "htc"
+        htc_fill, htc_pack, htc_detached = 5000.0, 2500.0, 1250.0
 
         if wall_model == "skin":
             c_skin = st.slider(
@@ -889,9 +1160,15 @@ with st.sidebar:
             skin_max_iter = st.slider(
                 "fixed-point 反復上限",
                 1,
-                10,
-                5,
-                help="τ ↔ h_core 結合の反復回数。3〜5で十分なケースが多い。",
+                100,
+                20,
+                help=(
+                    "τ ↔ h_core 結合の反復回数。ソルバ既定と同じ 20。圧力一定時計では封止が"
+                    "雪崩（スキン↑→抵抗↑→T_fill↑→スキン↑）になることがあり、途中で打ち切ると"
+                    "半分凍った絵が収束したように見える（sim v0.39.0）。この金型の既定形状は"
+                    "圧力一定時計だと 80 で収束、速度制御時計なら数回で収束する。"
+                    "未収束なら結果ペインに警告が出る。"
+                ),
             )
             skin_tol_log10 = st.slider(
                 "収束判定 log10(tol)",
@@ -921,18 +1198,130 @@ with st.sidebar:
                     "二相ショートショットの射出相は計量 V/Q の定義上つねに速度制御。"
                 ),
             )
-            if inj_profile is not None and skin_clock_mode == "constant_pressure":
-                # A screw profile prescribes a rate. Holding pressure instead
+            if inj_mode == "machine" and skin_clock_mode == "constant_pressure":
+                # A screw speed prescribes a rate. Holding pressure instead
                 # is the "machine could not keep up" scenario; the profile's
                 # shape survives (every stage stretches by the same factor)
                 # but the times are no longer the ones on the machine.
                 st.caption(
-                    "実機条件（スクリュー位置と速度）は速度制御そのものです。"
-                    "圧力一定を選ぶと、抵抗増のぶん**プロファイル全体が同じ倍率で**"
-                    "引き伸ばされ、V/P までの射出時間は設定値と一致しなくなります。"
+                    "スクリュー径と射出速度で決めた射出は速度制御そのものです。"
+                    "圧力一定を選ぶと、抵抗増のぶん**射出全体が同じ倍率で**"
+                    "引き伸ばされ、射出時間は設定値と一致しなくなります。"
                     "設定どおりの充填時間を見たいなら「速度制御」を選んでください。"
                 )
         elif wall_model == "multilayer":
+            fill_method = st.radio(
+                "充填の解き方",
+                options=("tau", "march"),
+                # 既定は時間で追う方（v0.12.0）。v0.11.0 までは一発で解く方（index=0）だった。
+                # sim の既定は一発で解く方のまま。
+                index=1,
+                key="fill_method",
+                format_func=lambda m: {
+                    "tau": "一発で解く（v0.11.0 までの既定）: 充填の順番を 1 回の計算で決める",
+                    "march": "時間で追う（既定）: 先端を時間で進める",
+                }[m],
+                help=(
+                    "一発で解く方は、充填の順番を 1 回の楕円型の計算（τ）で決める。速いが、"
+                    "ゲートブロックの厚い所を満たしきってから薄い所に入る癖がある。\n"
+                    "時間で追う方は、射出した量だけ先端を時間で進める。厚い所が埋まりきる前に、"
+                    "先端が届いた薄い所へも入り始める。総充填時間は射出率どおり（体積 ÷ 射出率。射出圧縮成形ではその短縮込み）になる。"
+                    "mold-flow-sim の別の製品では、ショートショットの写真の到達線に近づいた"
+                    "（sim v0.62.0 の変更履歴）。本リポの形状の写真とはまだ照合していない。"
+                    "計算は 1.0 mm で主解析と二相を合わせて 8〜10 分、一発で解く方は 1〜2 分。"
+                    "急ぐときはメッシュを粗くするか、一発で解く方を選ぶ。"
+                    "層の温度の読み方（到着時刻で冷える）は同じで、変わるのは順番の決め方だけ。"
+                    "時計は射出率どおり（速度制御）で、圧力一定の引き伸ばしは無い。"
+                    "下の反復上限と収束判定は、一発で解く方だけに効く。"
+                ),
+            )
+            thermal_model = st.radio(
+                "層の温度の解き方",
+                options=("arrival", "energy"),
+                index=0,
+                key="thermal_model",
+                disabled=fill_method != "march",
+                format_func=lambda m: {
+                    "arrival": "到達時刻から読む（既定）: 届いてからの時間、その場所の肉厚で冷えたとみなす",
+                    "energy": "刻みごとに解く: 厚さ方向の温度を状態として持ち、流れが熱を運ぶ",
+                }[m],
+                help=(
+                    "時間で追う解き方のときだけ選べる。射出圧縮成形のときは到達時刻から読む方で解く。\n"
+                    "到達時刻から読む方は、厚い所を通ってきた熱い樹脂が薄い所に入っても、最初からその薄い肉厚で"
+                    "冷えてきたものとして扱う。1 mm の額縁のような薄い所を冷たく見すぎる。\n"
+                    "刻みごとに解く方は、厚さ方向 16 層の温度を毎刻み解く（壁への熱伝導、流れが運ぶ熱、剪断発熱）。"
+                    "流れやすさはその場所の流量から決める。保圧を解くときは、VP 切替の時点の温度をそのまま保圧へ渡す。"
+                    "射出圧が下の上限に達すると流量が落ち、流れが止まればそこで充填を止める（理由は結果の先頭に出る）。"
+                    "面内（板の広がる向き）の熱の伝わりは入っていない。格子は 2 mm 以下で使う"
+                    "（4 mm は軸に対して左右対称に切れず、結果が左右で違って出る）。"
+                ),
+            )
+            if fill_method != "march":
+                thermal_model = "arrival"
+            inj_p_limit_mpa = st.number_input(
+                "射出圧の上限 [MPa]",
+                min_value=20.0,
+                max_value=400.0,
+                value=280.0,
+                step=10.0,
+                key="inj_p_limit_mpa",
+                disabled=thermal_model != "energy",
+                help=(
+                    "刻みごとに解くときだけ効く。ゲートの圧力がこの値に達すると、射出率を保てずに流量が落ちる。"
+                    "ノズル・ホットランナー・スプルーの圧力損失は入っていないので、機械の最大射出圧よりその分低く置く。"
+                ),
+            )
+            wall_contact_model = st.radio(
+                "金型との熱の伝わり方",
+                options=("htc", "ideal"),
+                index=0,
+                key="wall_contact_model",
+                disabled=thermal_model != "energy",
+                format_func=lambda m: {
+                    "htc": "熱伝達係数（既定。Moldflow と同じ扱い）",
+                    "ideal": "表面＝金型温度（v0.15 までの扱い）",
+                }[m],
+                help=(
+                    "刻みごとに解くときだけ効く。熱伝達係数は、樹脂の表面と金型の間の熱の伝わりやすさ。"
+                    "小さいほど表面が冷えにくく、薄い所が固まるのが遅くなる。"
+                    "「表面＝金型温度」は、樹脂の表面が触れた瞬間に金型温度になる扱いで、薄い所の固まりを早めに見る。"
+                ),
+            )
+            _htc_off = thermal_model != "energy" or wall_contact_model != "htc"
+            _hc0, _hc1, _hc2 = st.columns(3)
+            htc_fill = _hc0.number_input(
+                "充填中 [W/m²K]",
+                min_value=100.0,
+                max_value=100000.0,
+                value=5000.0,
+                step=500.0,
+                key="htc_fill",
+                disabled=_htc_off,
+                help="充填中の熱伝達係数。既定 5000 は Moldflow の既定と同じ。",
+            )
+            htc_pack = _hc1.number_input(
+                "保圧中 [W/m²K]",
+                min_value=100.0,
+                max_value=100000.0,
+                value=2500.0,
+                step=250.0,
+                key="htc_pack",
+                disabled=_htc_off,
+                help="VP 切替のあとの熱伝達係数。既定 2500 は Moldflow の既定と同じ。保圧を解くときに効く。",
+            )
+            htc_detached = _hc2.number_input(
+                "離れたあと [W/m²K]",
+                min_value=100.0,
+                max_value=100000.0,
+                value=1250.0,
+                step=250.0,
+                key="htc_detached",
+                disabled=_htc_off,
+                help=(
+                    "保圧中に圧力が 0 になり、樹脂が縮んで壁から離れたマスに使う熱伝達係数。"
+                    "既定 1250 は Moldflow の既定と同じ。保圧を解くときに効く。"
+                ),
+            )
             num_layers = st.slider(
                 "層数 N",
                 3,
@@ -998,9 +1387,8 @@ with st.sidebar:
         else:
             shear_heating_enabled = False
 
-    with st.expander("射出圧縮成形 (ICM)", expanded=False):
-        icm = st.checkbox("圧縮成形ON", value=True, key="icm_on")
-        if icm:
+    if icm:
+        with st.expander("射出圧縮成形 (ICM)", expanded=False):
             # ストローク (絶対加算) モードに統一。圧縮 mask 内の全セルに同じ絶対量を加算
             # するので段差プレートでも段差が保存される (金型シム量の物理に整合)。
             # 旧倍率モードは solver / CLI には後方互換で残しているが UI には出さない。
@@ -1024,10 +1412,101 @@ with st.sidebar:
                 step=0.05,
                 help="充填全体に対し、圧縮位相 (型開き状態) で占める時間比率。",
             )
-        else:
-            comp_factor = 1.0
-            comp_stroke = None
-            comp_frac = 0.0
+    else:
+        comp_factor = 1.0
+        comp_stroke = None
+        comp_frac = 0.0
+
+    if icm:
+        # 射出圧縮成形では保圧を解かないので、欄ごと出さない（値は使われない）
+        hold_on = False
+        hold_p_mpa, hold_t_s, hold_vp_pct = 60.0, 10.0, 99.0
+        machine_clamp_kN = 4413.0
+        flash_threshold_mpa = None
+        hold_coarse = False
+    else:
+        with st.expander("保圧", expanded=False):
+            hold_on = st.checkbox(
+                "保圧を解く",
+                value=False,
+                key="hold_on",
+                help=(
+                    "充填のあと、ゲートを保圧で保持して、圧力の時間変化と体積の縮みを解く"
+                    "（圧縮性つき Hele-Shaw、2 領域 Tait の pvT）。"
+                    "充填と同じ格子で解くので、解析時間が大きく延びる（数分〜数十分。形と VP 切替の値で変わる）。"
+                ),
+            )
+            hold_p_mpa = st.number_input(
+                "保圧 [MPa]",
+                min_value=0.0,
+                max_value=250.0,
+                value=60.0,
+                step=5.0,
+                key="hold_p_mpa",
+                disabled=not hold_on,
+                help="ゲートにかかる圧力。ノズル・ホットランナー・スプルーの圧力損失は入らない。",
+            )
+            hold_t_s = st.number_input(
+                "保圧時間 [s]",
+                min_value=0.0,
+                max_value=120.0,
+                value=10.0,
+                step=0.5,
+                key="hold_t_s",
+                disabled=not hold_on,
+                help="この時間のあとゲートを閉じる（バルブゲート。逆流はしない）。",
+            )
+            hold_vp_pct = st.number_input(
+                "VP 切替の充填率 [%]",
+                min_value=50.0,
+                max_value=100.0,
+                value=99.0,
+                step=1.0,
+                key="hold_vp_pct",
+                disabled=not hold_on,
+                help=(
+                    "体積のこの割合まで射出率で埋め、そこから保圧に切り替える。残りは保圧で埋める"
+                    "（機械が送る量は射出率が上限）。100 にすると、全部埋まったものとして保圧だけを見る。"
+                    "薄い所が保圧で埋まるかの判定は、温度の扱いが粗いので当てにならない（式解説 §9）。"
+                ),
+            )
+            machine_clamp_kN = st.number_input(
+                "機械の型締力 [kN]",
+                min_value=100.0,
+                max_value=50000.0,
+                value=4413.0,
+                step=100.0,
+                key="machine_clamp_kN",
+                disabled=not hold_on,
+                help=(
+                    "保圧の結果の「バリ注意」で、型を開く力のピークと比べる。既定はソディック 450t（4,413 kN）。"
+                ),
+            )
+            flash_threshold_mpa = st.number_input(
+                "バリの目安の圧力 [MPa]（空欄＝線を引かない）",
+                min_value=1.0,
+                max_value=400.0,
+                value=None,
+                step=5.0,
+                key="flash_threshold_mpa",
+                disabled=not hold_on,
+                placeholder="試作のバリの位置から決める",
+                help=(
+                    "「バリ注意」の図で、輪郭が溶けている間に受けた最大の圧力がこの値以上の所に紫の枠を付け、長さを出す。"
+                    "何 MPa でバリが出るかは型のすき間とたわみで決まるので、既定の値は持たない。"
+                    "試作でバリが出始めた所を図の圧力と見比べて決める。"
+                ),
+            )
+            hold_coarse = st.checkbox(
+                "保圧を粗い格子で解く（検算用）",
+                value=False,
+                key="hold_coarse",
+                disabled=not hold_on,
+                help=(
+                    "OFF（既定）は充填と同じ格子で解く。1 mm 格子では数十分かかることがある。"
+                    "ON はマスを 2 万以下にまとめて解く（検算用。それでも数分〜数十分）。"
+                ),
+            )
 
     # ショートショット欄はこの位置に出すが、中身は版表示の後で埋める:
     # build_geometry() は不整合で st.stop() するので、サイドバー内で先に呼ぶと
@@ -1087,122 +1566,228 @@ with st.sidebar:
     with _short_shot_slot:
         geom, geom_settings = build_geometry(fan_inputs)
 
-        with st.expander("ショートショット（計量制限）", expanded=False):
-            # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
-            # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
-            # 線形求解2回・時間積分なし。実機の計量値をそのまま入れて
-            # 段階ショートショットの現物形状と直接比較する用途。
-            two_phase_on = st.checkbox(
-                "二相ショートショット解析ON",
-                value=True,
-                key="two_phase_on",
-                help=(
-                    "計量を意図的に絞ったショートショットの最終形状を予測する。"
-                    "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
-                    "溶融プールを前進、体積保存）の二相。壁面冷却モデルは『なし』か"
-                    "『スキン層』で実行（スキン層は射出相に乗る: 開いた薄板が射出中に"
-                    "痩せてゲート部が先に埋まる順番を出す）。『層別』とは併用不可。"
-                ),
-            )
-            if two_phase_on and wall_model == "multilayer":
-                # 実行時の一過性警告だけだと rerun で消えて「ON にしたのに何も
-                # 出ない」に見える。設定と同じ場所に常時出す。
-                st.warning(
-                    "壁面冷却モデルが『なし』または『スキン層』のときだけ実行される。"
-                    "現在の設定（層別）では二相解析はスキップされる。"
-                )
-            if two_phase_on:
-                # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
-                # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
-                # 丸めない: solver は素の体積と比較するので、下に丸めた既定は
-                # 「完全充填ちょうど」でなく極小のショートショットになる（Codex P2）。
-                # 「触った」の判定は on_change（計量欄そのものへのユーザー操作）で
-                # 立つフラグに限る。「前回の自動値と今の値が一致するか」で判定すると、
-                # 形状ウィジェットの連打で前の rerun の新値がブラウザに届く前に次の
-                # rerun が始まったとき、ブラウザが持つ古い値が session_state に書き
-                # 戻されて「不一致＝触った」と誤判定し、以後の追従が黙って止まる
-                # （2026-09-11、翼 t0.65 の計量のまま t0.9 を解析して 0.4% ショート）。
-                # ただし Streamlit は script 本体より先に「前回の状態と違う widget 値」の
-                # on_change を発火するので、stale echo でもコールバックは呼ばれる。
-                # 届いた値が過去の自動値のどれかと一致するなら echo であって編集では
-                # ない（13 桁の浮動小数を手で打つことはない）— それだけを除外する。
-                _v_cav = float(geom.volume_cm3())
-                # 履歴の深さ 32 は「echo が届くより先に積もる形状変更の回数」の上限。
-                # 1 rerun は形状ビルドで 0.5〜1 s かかり、ブラウザの echo 遅れは
-                # 高々数 rerun なので 32 で桁余り。超えれば echo を編集と誤判定する
-                # が、その場合もリセットボタンで追従を再開できる。
-                _auto_hist: list[float] = st.session_state.setdefault(
-                    "mfs_shot_volume_auto_history", []
-                )
-                if _v_cav not in _auto_hist:
-                    _auto_hist.append(_v_cav)
-                    del _auto_hist[:-32]
-                # 二相を OFF にした rerun で widget が描かれないと Streamlit は
-                # `two_phase_shot_volume` を session_state から落とすが、非 widget の
-                # 編集フラグは残る。そのまま ON に戻すと「編集済みなので触らない」で
-                # 初期化を飛ばし、number_input が min の 0.01 cm³ で再登場して次の
-                # 実行がほぼ空の計量になる（Codex P2 on PR #87）。編集値は widget と
-                # 別のキーに写しておき、widget が消えていたらそこから復元する。
-                _edited = st.session_state.get("mfs_shot_volume_user_edited", False)
-                if "two_phase_shot_volume" not in st.session_state:
-                    _kept = st.session_state.get("mfs_shot_volume_user_value")
-                    if _edited and _kept is not None:
-                        st.session_state["two_phase_shot_volume"] = _kept
-                    else:
-                        st.session_state["mfs_shot_volume_user_edited"] = _edited = False
-                        st.session_state["two_phase_shot_volume"] = _v_cav
-                elif not _edited:
-                    st.session_state["two_phase_shot_volume"] = _v_cav
-                st.session_state["mfs_shot_volume_auto"] = _v_cav
-
-                def _mark_shot_volume_edited() -> None:
-                    _v = st.session_state["two_phase_shot_volume"]
-                    if _v not in st.session_state.get("mfs_shot_volume_auto_history", []):
-                        st.session_state["mfs_shot_volume_user_edited"] = True
-                        st.session_state["mfs_shot_volume_user_value"] = _v
-
-                def _reset_shot_volume() -> None:
-                    st.session_state["mfs_shot_volume_user_edited"] = False
-                    st.session_state.pop("mfs_shot_volume_user_value", None)
-                    st.session_state["two_phase_shot_volume"] = st.session_state[
-                        "mfs_shot_volume_auto"
-                    ]
-
-                shot_volume_cm3 = st.number_input(
-                    "計量体積 V_shot [cm³]",
-                    min_value=0.01,
-                    step=0.1,
-                    key="two_phase_shot_volume",
-                    on_change=_mark_shot_volume_edited,
+        # 二相ショートショットは、射出圧縮成形（開いた型に射出して、あとから閉じる）を
+        # 2 つの相で表すためのもの。通常成形には圧縮相が無いので、欄ごと出さない。
+        two_phase_on = False
+        shot_volume_cm3 = None
+        st.session_state["mfs_shot_volume_auto"] = float(geom.volume_cm3())
+        if icm:
+            with st.expander("ショートショット（計量制限）", expanded=False):
+                # 二相モデル: (1) 射出相 = 型開きギャップで計量体積ぶん充填、
+                # (2) 圧縮相 = 型閉じで溶融プールを等圧ソースとして前進（体積保存）。
+                # 線形求解2回・時間積分なし。実機の計量値をそのまま入れて
+                # 段階ショートショットの現物形状と直接比較する用途。
+                two_phase_on = st.checkbox(
+                    "二相ショートショット解析ON",
+                    value=True,
+                    key="two_phase_on",
                     help=(
-                        "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
-                        "体積（完全充填ちょうど）で、欄を編集するまで形状変更に追従する。"
-                        "減らすとショートショットになる。"
+                        "計量を意図的に絞ったショートショットの最終形状を予測する。"
+                        "射出相（型開きギャップで計量体積まで充填）→ 圧縮相（型閉じで"
+                        "溶融プールを前進、体積保存）の二相。壁面冷却モデルは射出相に乗る:"
+                        "スキン層は開いた薄板が射出中に痩せてゲート部が先に埋まる順番を、"
+                        "層別は層ごとの温度・粘度で決まる順番を、どちらも計量 V/Q の時計で出す。"
+                        "圧縮相はどのモデルでも等温。"
                     ),
                 )
-                _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
-                if icm and comp_stroke is not None:
-                    _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
-                    _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
-                _short = _v_cav - float(shot_volume_cm3)
-                if _short > 1e-9:
-                    _hint += (
-                        f"。**計量がキャビティ体積を {_short:.2f} cm³ 下回る → ショートショット**"
+                if two_phase_on:
+                    # 既定値は現在の形状の最終キャビティ体積。形状を変えると追従するが、
+                    # ユーザーが値を触った後は（前回の自動値から動いているので）触らない。
+                    # 丸めない: solver は素の体積と比較するので、下に丸めた既定は
+                    # 「完全充填ちょうど」でなく極小のショートショットになる（Codex P2）。
+                    # 「触った」の判定は on_change（計量欄そのものへのユーザー操作）で
+                    # 立つフラグに限る。「前回の自動値と今の値が一致するか」で判定すると、
+                    # 形状ウィジェットの連打で前の rerun の新値がブラウザに届く前に次の
+                    # rerun が始まったとき、ブラウザが持つ古い値が session_state に書き
+                    # 戻されて「不一致＝触った」と誤判定し、以後の追従が黙って止まる
+                    # （2026-09-11、翼 t0.65 の計量のまま t0.9 を解析して 0.4% ショート）。
+                    # ただし Streamlit は script 本体より先に「前回の状態と違う widget 値」の
+                    # on_change を発火するので、stale echo でもコールバックは呼ばれる。
+                    # 届いた値が過去の自動値のどれかと一致するなら echo であって編集では
+                    # ない（13 桁の浮動小数を手で打つことはない）— それだけを除外する。
+                    _v_cav = float(geom.volume_cm3())
+                    # 履歴の深さ 32 は「echo が届くより先に積もる形状変更の回数」の上限。
+                    # 1 rerun は形状ビルドで 0.5〜1 s かかり、ブラウザの echo 遅れは
+                    # 高々数 rerun なので 32 で桁余り。超えれば echo を編集と誤判定する
+                    # が、その場合もリセットボタンで追従を再開できる。
+                    _auto_hist: list[float] = st.session_state.setdefault(
+                        "mfs_shot_volume_auto_history", []
                     )
+                    if _v_cav not in _auto_hist:
+                        _auto_hist.append(_v_cav)
+                        del _auto_hist[:-32]
+                    # 二相を OFF にした rerun で widget が描かれないと Streamlit は
+                    # `two_phase_shot_volume` を session_state から落とすが、非 widget の
+                    # 編集フラグは残る。そのまま ON に戻すと「編集済みなので触らない」で
+                    # 初期化を飛ばし、number_input が min の 0.01 cm³ で再登場して次の
+                    # 実行がほぼ空の計量になる（Codex P2 on PR #87）。編集値は widget と
+                    # 別のキーに写しておき、widget が消えていたらそこから復元する。
+                    _edited = st.session_state.get("mfs_shot_volume_user_edited", False)
+                    if "two_phase_shot_volume" not in st.session_state:
+                        _kept = st.session_state.get("mfs_shot_volume_user_value")
+                        if _edited and _kept is not None:
+                            st.session_state["two_phase_shot_volume"] = _kept
+                        else:
+                            st.session_state["mfs_shot_volume_user_edited"] = _edited = False
+                            st.session_state["two_phase_shot_volume"] = _v_cav
+                    elif not _edited:
+                        st.session_state["two_phase_shot_volume"] = _v_cav
+                    st.session_state["mfs_shot_volume_auto"] = _v_cav
+
+                    def _mark_shot_volume_edited() -> None:
+                        _v = st.session_state["two_phase_shot_volume"]
+                        if _v not in st.session_state.get("mfs_shot_volume_auto_history", []):
+                            st.session_state["mfs_shot_volume_user_edited"] = True
+                            st.session_state["mfs_shot_volume_user_value"] = _v
+
+                    def _reset_shot_volume() -> None:
+                        st.session_state["mfs_shot_volume_user_edited"] = False
+                        st.session_state.pop("mfs_shot_volume_user_value", None)
+                        st.session_state["two_phase_shot_volume"] = st.session_state[
+                            "mfs_shot_volume_auto"
+                        ]
+
+                    shot_volume_cm3 = st.number_input(
+                        "計量体積 V_shot [cm³]",
+                        min_value=0.01,
+                        step=0.1,
+                        key="two_phase_shot_volume",
+                        on_change=_mark_shot_volume_edited,
+                        help=(
+                            "実機の計量値（ショット体積）。既定は現在の形状の最終キャビティ"
+                            "体積（完全充填ちょうど）で、欄を編集するまで形状変更に追従する。"
+                            "減らすとショートショットになる。"
+                        ),
+                    )
+                    _hint = f"最終キャビティ体積 {_v_cav:.2f} cm³"
+                    if icm and comp_stroke is not None:
+                        _v_open = _v_cav + comp_stroke * geom.compression_area_mm2() / 1000.0
+                        _hint += f" / 開きギャップ体積 ≈ {_v_open:.2f} cm³"
+                    _short = _v_cav - float(shot_volume_cm3)
+                    if _short > 1e-9:
+                        _hint += f"。**計量がキャビティ体積を {_short:.2f} cm³ 下回る → ショートショット**"
+                    else:
+                        _hint += "。計量が最終キャビティ体積以上だと完全充填になる"
+                    st.caption(_hint)
+                    if st.session_state.get("mfs_shot_volume_user_edited", False):
+                        st.button(
+                            "計量をキャビティ体積に戻す（形状追従を再開）",
+                            key="two_phase_shot_volume_reset",
+                            on_click=_reset_shot_volume,
+                        )
                 else:
-                    _hint += "。計量が最終キャビティ体積以上だと完全充填になる"
-                st.caption(_hint)
-                if st.session_state.get("mfs_shot_volume_user_edited", False):
-                    st.button(
-                        "計量をキャビティ体積に戻す（形状追従を再開）",
-                        key="two_phase_shot_volume_reset",
-                        on_click=_reset_shot_volume,
-                    )
-            else:
-                shot_volume_cm3 = None
+                    shot_volume_cm3 = None
 
 
 # ----------------------- main panel -----------------------
+
+
+def _gate_open_note(md: dict) -> str | None:
+    """When the gates that open later opened (direct gates), from the run's record."""
+    late = md.get("delayed_gates") or []
+    if not late:
+        return None
+    parts = []
+    opened = set()
+    for e in md.get("gate_events") or []:
+        opened.add(int(e["gate"]))
+        parts.append(
+            f"{int(e['gate']) + 2} つ目のゲートは {float(e['t_s']):.2f} 秒で開いた"
+            + ("（樹脂が届いたあと）" if e.get("melt_already_there") else "（樹脂が届く前）")
+        )
+    for k, d in enumerate(late):
+        if k not in opened:
+            why = (
+                "樹脂が届かなかった"
+                if d.get("on_arrival")
+                else f"開く時刻 {float(d['delay_s']):.2f} 秒より先に充填が終わった"
+            )
+            parts.append(f"{k + 2} つ目のゲートは開かなかった（{why}）")
+    return "遅らせて開くゲート: " + "、".join(parts) + "。"
+
+
+def _stall_note(md: dict, unreached: np.ndarray | None, geom: Geometry) -> str | None:
+    """Say why a fill that carries the temperature stopped short, and what is left.
+
+    The march stops either at the injection pressure limit with the rate fallen
+    away, or with the way to the last cells frozen shut before the limit ever
+    slowed the melt. The second leaves, where a front that stopped and froze
+    meets a later one whose melt is solid as well, a line one or two cells wide
+    with melt on both sides (a later front that still flows fills the cell:
+    ``MultilayerHeleShawSolver.late_front_inflow``). That line is a seam, not a
+    region the melt did not reach. A rim or a region left unfilled stays a short
+    shot, and a stall the record cannot attribute is reported as such.
+    """
+    if not md.get("march_stalled") or unreached is None:
+        return None
+    un = np.asarray(unreached, dtype=bool) & geom.mask
+    if not un.any():
+        return None
+    n_cells = int(un.sum())
+    vol_cm3 = float(geom.thickness_mm[un].sum()) * geom.cell_size_mm**2 / 1000.0
+    head = (
+        f"充填は体積の {100.0 * float(md.get('march_volume_fraction', 1.0)):.2f} % で止まった。"
+        f"届かなかった所は {n_cells} マス・{vol_cm3:.2f} cm³。"
+    )
+    limit = md.get("injection_pressure_limit_MPa")
+    at_limit = f"射出圧の上限（{limit:g} MPa）" if limit is not None else "射出圧の上限"
+    cause = md.get("march_stall_cause")
+    if cause == "undetermined":
+        return head + (
+            f"ゲートの圧力が{at_limit}に達したところで、流量がほぼ 0 になった。"
+            "上限が足りないのか、残りへ入る道が固まったのかは、この計算の記録からは分けられない。"
+        )
+    if cause != "frozen_path":
+        return head + f"ゲートの圧力が{at_limit}に達して流量が落ち、流れが止まった。"
+    p_free = float(md.get("march_gate_pressure_free_max_MPa", 0.0))
+    why = (
+        f"{at_limit}が理由ではない（止まる前のゲートの圧力は最大 {p_free:.0f} MPa）。"
+        "残りへ入る所のマスが、中心まで固まっている。"
+    )
+    if not enclosed_seams(un, geom.mask):
+        return head + why + "樹脂が届く前に道が固まった所（ショート）と読む。"
+    return (
+        head
+        + why
+        + (
+            "残りは幅 1〜2 マスの線で、線の両側には樹脂が届いている。2 つの先端の合わせ目にあたり、"
+            "どちらの側の樹脂も固まっていて、間が埋まらない。面で欠ける予測ではなく、"
+            "ウェルドが弱く出やすい場所の目安として読む。"
+        )
+    )
+
+
+def _fixed_point_warning(
+    md: dict,
+    *,
+    converged_key: str,
+    what: str,
+    advice: str,
+    no_flow_key: str | None = "no_flow",
+) -> bool:
+    """Warn when a fixed-point loop recorded in ``md`` was cut off.
+
+    A truncated loop draws a half-frozen field that looks converged (sim
+    v0.39.0), so the warning goes wherever the numbers are read, not only
+    inside a collapsed expander. ``no_flow`` (every path but the gate sealed)
+    is the loop's terminal state, not a cut-off. Returns True when something
+    was shown."""
+    if md.get(converged_key) is not False:
+        return False
+    if no_flow_key and md.get(no_flow_key):
+        st.info(
+            f"{what}: ゲート以外の流路が全て封止した状態で終了（反復の打ち切りではない）。"
+            "これ以上反復しても場は変わらないので、この表示が最終解。"
+        )
+    else:
+        st.warning(
+            f"{what}の fixed-point 反復が上限で打ち切られた。表示は途中状態で、"
+            f"封止・未充填が実際より少なく見えることがある。{advice}"
+        )
+    return True
+
+
+_SKIN_ADVICE = "反復上限を上げるか、時計を「速度制御」にして再実行を。"
 
 
 col_left, col_right = st.columns([1, 1.3])
@@ -1267,12 +1852,33 @@ analysis_inputs = {
             multilayer_tol,
             solid_fraction,
             shear_heating_enabled,
+            fill_method,
+            thermal_model,
+            inj_p_limit_mpa if thermal_model == "energy" else None,
+            (
+                (wall_contact_model, htc_fill, htc_pack, htc_detached)
+                if thermal_model == "energy" and wall_contact_model == "htc"
+                else (wall_contact_model if thermal_model == "energy" else None)
+            ),
         )
         if multilayer_on
         else ("none",)
     ),
     "compression_molding": (icm, comp_stroke, comp_frac),
     "two_phase_short_shot": (two_phase_on, shot_volume_cm3),
+    "holding": (
+        (
+            hold_on,
+            hold_p_mpa,
+            hold_t_s,
+            hold_vp_pct,
+            hold_coarse,
+            machine_clamp_kN,
+            flash_threshold_mpa,
+        )
+        if hold_on
+        else (False,)
+    ),
     "output": (num_frames, fill_cmap, iso_levels),
 }
 STALE_RESULT_MSG = (
@@ -1310,6 +1916,18 @@ if do_run:
     if inj_error is not None:
         st.error(inj_error)
         st.stop()
+    if geom.delayed_gates and not (multilayer_on and fill_method == "march"):
+        st.error(
+            "直接ゲートを遅らせて開く計算は、壁面冷却の表現が「層別」で、充填の解き方が「時間で追う」のときだけ解ける。"
+            "どちらかを直すか、「2 つ目からのゲートを開く時」を「同時に開く」に戻す。"
+        )
+        st.stop()
+    # 刻みごとに解く温度は、射出圧縮では試していないので到達時刻から読む方に戻す
+    energy_on = multilayer_on and thermal_model == "energy" and not icm
+    if multilayer_on and thermal_model == "energy" and icm:
+        st.info(
+            "射出圧縮成形なので、層の温度は到達時刻から読む方で解いた（刻みごとに解く方は通常成形だけ）。"
+        )
     with st.spinner("Hele-Shaw方程式を解いている…"):
         if multilayer_on:
             solver = MultilayerHeleShawSolver(
@@ -1331,6 +1949,16 @@ if do_run:
                 convergence_tol=multilayer_tol,
                 solidification_temperature_fraction=solid_fraction,
                 shear_heating_enabled=shear_heating_enabled,
+                fill_method=fill_method,
+                thermal_model="energy" if energy_on else "arrival",
+                injection_pressure_limit_Pa=float(inj_p_limit_mpa) * 1e6,
+                mold_htc_fill_W_m2K=(
+                    float(htc_fill) if energy_on and wall_contact_model == "htc" else None
+                ),
+                # 保圧へ渡す VP 切替の時点の温度
+                thermal_snapshot_fractions=(
+                    (float(hold_vp_pct) / 100.0,) if energy_on and hold_on else ()
+                ),
             )
         else:
             solver = HeleShawSolver(
@@ -1362,27 +1990,20 @@ if do_run:
             st.error(f"解析できない形状: {exc}")
             st.stop()
 
-        # 二相ショートショット。HeleShawSolver 専用（等温、またはスキン層を
-        # 射出相に乗せる）— 層別ソルバーには射出相の時計が無い。
+        # 二相ショートショット。壁面冷却モデル（なし／スキン層／層別）は射出相に
+        # 乗る。層別は固定点を計量 V/Q の時計（膨張なし）で解き直す。
         two_phase_result = None
         two_phase_skip_reason: str | None = None
         if two_phase_on:
-            if multilayer_on:
-                two_phase_skip_reason = "壁面冷却モデルが『層別』に設定されている（併用不可）"
-                st.warning(
-                    "二相ショートショット解析は壁面冷却モデル『なし』または『スキン層』専用です。"
-                    "今回はスキップしました。"
-                )
-            else:
-                try:
-                    two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
-                except ValueError as e:
-                    # 例: 計量がゲート群の開ギャップ体積を下回る。メッセージは
-                    # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
-                    # 含まない。
-                    two_phase_result = None
-                    two_phase_skip_reason = str(e)
-                    st.warning(f"二相ショートショット解析をスキップしました: {e}")
+            try:
+                two_phase_result = solve_two_phase_short_shot(solver, shot_volume_cm3)
+            except ValueError as e:
+                # 例: 計量がゲート群の開ギャップ体積を下回る。メッセージは
+                # モデル側の固定文言 + 体積数値のみで、パス等の秘匿情報は
+                # 含まない。
+                two_phase_result = None
+                two_phase_skip_reason = str(e)
+                st.warning(f"二相ショートショット解析をスキップしました: {e}")
 
         # 入力の記録。metadata.json は解いた結果しか持たないので、これが無いと
         # ダウンロードした ZIP から設定を復元できない (画像から寸法を測って
@@ -1396,6 +2017,7 @@ if do_run:
                 "mold_temperature_C": mold_C,
                 "injection_velocity_mms": inj_v,
                 "rate_input_mode": inj_mode,
+                "machine": inj_machine,
                 "injection_volume_flow_cm3s": inj_Q,
                 "injection_profile": (None if inj_profile is None else inj_profile.as_record()),
             },
@@ -1416,6 +2038,20 @@ if do_run:
                     "convergence_tol": multilayer_tol,
                     "solidification_temperature_fraction": solid_fraction,
                     "shear_heating_enabled": shear_heating_enabled,
+                    "fill_method": fill_method,
+                    # what was solved: "energy" falls back to "arrival" with compression on
+                    "thermal_model": "energy" if energy_on else "arrival",
+                    "injection_pressure_limit_MPa": float(inj_p_limit_mpa) if energy_on else None,
+                    # None: the melt's surface at the mold temperature
+                    "mold_htc_W_m2K": (
+                        {
+                            "filling": float(htc_fill),
+                            "packing": float(htc_pack),
+                            "detached": float(htc_detached),
+                        }
+                        if energy_on and wall_contact_model == "htc"
+                        else None
+                    ),
                 }
                 if multilayer_on
                 else {"model": "none"}
@@ -1435,8 +2071,24 @@ if do_run:
                     "enabled": True,
                     "shot_volume_cm3": shot_volume_cm3,
                     "skin_layer": bool(skin_on),
+                    "wall_model": wall_model,
                 }
                 if two_phase_result is not None
+                else {"enabled": False}
+            ),
+            "holding": (
+                {
+                    "enabled": True,
+                    "pressure_MPa": float(hold_p_mpa),
+                    "time_s": float(hold_t_s),
+                    "vp_switch_fill_percent": float(hold_vp_pct),
+                    "coarse_grid": bool(hold_coarse),
+                    "machine_clamp_kN": float(machine_clamp_kN),
+                    "flash_threshold_MPa": (
+                        None if flash_threshold_mpa is None else float(flash_threshold_mpa)
+                    ),
+                }
+                if hold_on
                 else {"enabled": False}
             ),
             "output": {
@@ -1479,6 +2131,211 @@ if do_run:
         _weld_path = render_weldlines(
             result, _tmp_dir / "weld.png", weld_min_angle_deg=float(weld_min_angle)
         )
+        # 保圧が届く時間（見積り）。キャビティの厚さが動かない通常成形でだけ出す:
+        # 射出圧縮は圧縮そのものが保圧の役をし、厚さも充填中に変わる。
+        # 出せないときは理由を残して充填の結果はそのまま見せる: ここで例外を出すと、
+        # 済んだ解析の結果も ZIP も画面に届かなくなる（Codex P2 on PR #18）。
+        _pack_path: Path | None = None
+        _pack_rows: list[dict] | None = None
+        _pack_skip: str | None = None
+        if icm:
+            _pack_skip = PACK_SKIP_ICM
+        elif not 0.0 < float(solid_fraction) < 1.0:
+            # 層別の「固化判定 fraction」は 0 まで選べる。0 は「金型温度まで下がったら固化」で、
+            # 板の中心がそこへ届く時刻は決まらない（無限大）
+            _pack_skip = PACK_SKIP_FRACTION
+        else:
+            _pack = packing_reach(
+                geom.mask,
+                geom.thickness_mm,
+                result.fill_time_s,
+                geom.gates,
+                float(mat.thermal_diffusivity_m2_s),
+                float(solid_fraction),
+            )
+            _pack_path = render_packing_reach_map(result, _pack, _tmp_dir / "packing_reach.png")
+            _pack_region = geom.mask if geom.product_mask is None else geom.mask & geom.product_mask
+            _pack_rows = summarize_by_thickness(
+                _pack, geom.thickness_mm, _pack_region, geom.cell_size_mm
+            )
+        # 保圧の計算（圧力の時間変化と体積の縮み）。頼まれたときだけ解く。
+        _hold_path: Path | None = None
+        _hold_hist_path: Path | None = None
+        _hold_late_path: Path | None = None
+        _hold_rows: list[dict] | None = None
+        _hold_info: dict | None = None
+        _flash_path: Path | None = None
+        _flash_info: dict | None = None
+        _hold_skip: str | None = None
+        if icm:  # the sidebar hides the holding inputs with ICM
+            _hold_skip = HOLD_SKIP_ICM
+        elif not hold_on:
+            _hold_skip = HOLD_SKIP_OFF
+        elif mat.pvt is None:
+            _hold_skip = HOLD_SKIP_PVT
+        elif not 0.0 < float(solid_fraction) < 1.0:
+            _hold_skip = PACK_SKIP_FRACTION
+        elif not np.all(np.isfinite(np.asarray(result.fill_time_s, dtype=float)[geom.mask])):
+            _hold_skip = HOLD_SKIP_SHORT
+        else:
+            _hold_factor = (
+                coarsening_factor(int(geom.mask.sum()), HOLD_MAX_CELLS) if hold_coarse else 1
+            )
+            # 機械が送れる量の上限。射出率が決まっていればその値、プロファイルのときは
+            # 設定した射出がキャビティの体積を送る平均（解いた充填時間は、射出圧の上限で
+            # 遅れたり止まったりすると機械の速さを表さないので使わない）
+            _hold_rate = (
+                float(inj_Q) * 1e-6
+                if inj_Q
+                else getattr(solver, "_base", solver).programmed_mean_rate_cm3s(
+                    float(geom.thickness_mm[geom.mask].sum()) * geom.cell_size_mm**2
+                )
+                * 1e-6
+            )
+            # 充填で温度を刻みごとに解いたときは、VP 切替の時点の温度を保圧へ渡す
+            _arrival = np.asarray(result.fill_time_s, dtype=float)
+            _vp = float(hold_vp_pct) / 100.0
+            _hold_thermal: dict = {}
+            _hold_note: str | None = None
+            _hold_blocked: str | None = None
+            if energy_on:
+                _md = result.metadata
+                _snaps = getattr(result, "thermal_snapshots", None) or {}
+                _unreached = getattr(result, "unreached_mask", None)
+                _stalled = bool(_md.get("march_stalled", False))
+                _delivered = float(_md.get("march_volume_fraction", 1.0))
+                _theta = None
+                if _vp in _snaps and not (_stalled and _vp >= _delivered):
+                    _theta = _snaps[_vp][1]
+                elif _stalled and _unreached is not None and np.any(_unreached & geom.mask):
+                    # 充填が VP 切替より前で止まった: 止まった時点で切り替え、届かなかった
+                    # マスは空として保圧で埋めにいく（到達時刻を充填の終わりの後ろへ送る）
+                    _theta = getattr(result, "thermal_theta_end", None)
+                    _cell_v = geom.thickness_mm * geom.cell_size_mm**2
+                    _reached_v = float(_cell_v[geom.mask & ~_unreached].sum())
+                    _vp = _reached_v / float(_cell_v[geom.mask].sum()) * (1.0 - 1e-9)
+                    _arrival = np.where(_unreached, np.nanmax(_arrival[geom.mask]) + 1.0, _arrival)
+                    _hold_note = (
+                        f"充填が体積の {100.0 * _delivered:.2f} % で止まったので、VP 切替の設定より前の"
+                        "その時点で保圧に切り替えた。届かなかった所は空として、保圧で埋めにいく。"
+                    )
+                elif _vp >= 1.0:
+                    _theta = getattr(result, "thermal_theta_end", None)
+                if _theta is None:
+                    _hold_blocked = (
+                        "充填の VP 切替の時点の温度が残っていないので、保圧を解けませんでした"
+                        "（解き直すと出ます）。"
+                    )
+                else:
+                    _hold_thermal = {
+                        "thermal": "layers",
+                        "initial_theta": _theta,
+                        "shear_heating_enabled": bool(shear_heating_enabled),
+                    }
+                    if wall_contact_model == "htc":
+                        _hold_thermal["htc_packing_W_m2K"] = float(htc_pack)
+                        _hold_thermal["htc_detached_W_m2K"] = float(htc_detached)
+            _hold = None
+            if _hold_blocked is not None:
+                _hold_skip = _hold_blocked
+                st.warning(_hold_skip)
+            else:
+                if _hold_note is not None:
+                    st.info(_hold_note)
+                try:
+                    with st.spinner("保圧を解いている…"):
+                        _hold = solve_packing_coarsened(
+                            geom.mask,
+                            geom.thickness_mm,
+                            _arrival,
+                            geom.gates,
+                            geom.cell_size_mm,
+                            mat,
+                            melt_C + 273.15,
+                            mold_C + 273.15,
+                            float(hold_p_mpa) * 1e6,
+                            float(hold_t_s),
+                            solid_fraction=float(solid_fraction),
+                            factor=_hold_factor,
+                            switch_fill_fraction=_vp,
+                            max_inflow_m3_s=_hold_rate,
+                            **_hold_thermal,
+                        )
+                except (ValueError, RuntimeError) as e:
+                    # 充填の結果は済んでいる。保圧だけ理由を残して飛ばす
+                    _hold_skip = f"保圧の計算を完了できませんでした: {e}"
+                    st.warning(_hold_skip)
+            if _hold is not None:
+                _hold_region = (
+                    geom.mask if geom.product_mask is None else geom.mask & geom.product_mask
+                )
+                _hold_path = render_packing_shrinkage_map(
+                    result, _hold, _tmp_dir / "packing_solve.png"
+                )
+                _hold_late_path = render_packing_late_fill_map(
+                    result, _hold, _tmp_dir / "packing_late_fill.png"
+                )
+                _hold_hist_path = render_packing_pressure_history(
+                    _hold, geom.thickness_mm, _hold_region, _tmp_dir / "packing_pressure.png"
+                )
+                _hold_rows = summarize_solve_by_thickness(
+                    _hold, geom.thickness_mm, _hold_region, geom.cell_size_mm
+                )
+                _hold_info = {
+                    "pressure_MPa": float(hold_p_mpa),
+                    "time_s": float(hold_t_s),
+                    "vp_switch_fill_percent": round(100.0 * _vp, 6),
+                    "vp_switch_note": _hold_note,
+                    "vp_switch_time_s": float(_hold.switch_time_s),
+                    "unfilled_volume_percent": 100.0 * _hold.unfilled_volume_fraction,
+                    "max_inflow_cm3_s": _hold_rate * 1e6,
+                    "solid_fraction": float(solid_fraction),
+                    "grid_mm": float(_hold.cell_size_mm),
+                    "added_mass_percent": 100.0 * _hold.added_mass_fraction,
+                    "clamp_force_peak_kN": float(_hold.clamp_force_N.max()) / 1e3,
+                    "end_time_s": float(_hold.times_s[-1]),
+                    "unconverged_steps": int(_hold.unconverged_steps),
+                    "rate_cap_exceeded_steps": int(_hold.rate_cap_exceeded_steps),
+                    "thermal": "layers" if _hold_thermal else "series",
+                }
+                # バリ注意（PL）: 輪郭のセルが溶けている間に受けた最大の圧力
+                _flash = flash_risk(
+                    geom,
+                    _hold,
+                    machine_clamp_N=float(machine_clamp_kN) * 1e3,
+                    threshold_Pa=(
+                        None if flash_threshold_mpa is None else float(flash_threshold_mpa) * 1e6
+                    ),
+                )
+                _flash_path = render_flash_risk_map(result, _flash, _tmp_dir / "flash_risk.png")
+
+                def _spot_row(tag, sp):
+                    return {
+                        "印": tag,
+                        "x [mm]": round(sp.x_mm, 1),
+                        "y [mm]": round(sp.y_mm, 1),
+                        "肉厚 [mm]": round(sp.thickness_mm, 2),
+                        "最大圧力 [MPa]": round(sp.pressure_Pa / 1e6, 1),
+                        "時刻 [s]": round(sp.time_s, 2),
+                    }
+
+                _flash_info = {
+                    "product_spots": [
+                        _spot_row(str(k), sp) for k, sp in enumerate(_flash.spots, start=1)
+                    ],
+                    "runner_spots": [
+                        _spot_row(f"R{k}", sp) for k, sp in enumerate(_flash.runner_spots, start=1)
+                    ],
+                    "clamp_peak_kN": _flash.clamp_peak_N / 1e3,
+                    "clamp_peak_time_s": _flash.clamp_peak_time_s,
+                    "machine_clamp_kN": float(machine_clamp_kN),
+                    "thermal": _hold_info["thermal"],
+                    "threshold_MPa": (
+                        None if _flash.threshold_Pa is None else _flash.threshold_Pa / 1e6
+                    ),
+                    "over_length_product_mm": _flash.over_length_product_mm,
+                    "over_length_runner_mm": _flash.over_length_runner_mm,
+                }
         _skin_path: Path | None = None
         _core_path: Path | None = None
         _layer_T_grid_path: Path | None = None
@@ -1533,6 +2390,11 @@ if do_run:
                 _gif_path,
                 _press_path,
                 _weld_path,
+                _pack_path,
+                _hold_path,
+                _hold_hist_path,
+                _hold_late_path,
+                _flash_path,
                 _skin_path,
                 _core_path,
                 _layer_T_grid_path,
@@ -1564,6 +2426,28 @@ if do_run:
                 "metadata.json",
                 json.dumps(result.metadata, indent=2, ensure_ascii=False, default=str),
             )
+            if _pack_rows is not None:
+                _zf_run.writestr(
+                    "packing_reach.json",
+                    json.dumps(
+                        {"solid_fraction": float(solid_fraction), "by_thickness": _pack_rows},
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                )
+            if _hold_rows is not None:
+                _zf_run.writestr(
+                    "packing_solve.json",
+                    json.dumps(
+                        {**(_hold_info or {}), "by_thickness": _hold_rows},
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                )
+            if _flash_info is not None:
+                _zf_run.writestr(
+                    "flash_risk.json", json.dumps(_flash_info, indent=2, ensure_ascii=False)
+                )
             if two_phase_result is not None:
                 if _two_phase_player_html is not None:
                     _zf_run.writestr(
@@ -1604,6 +2488,18 @@ if do_run:
         st.session_state["mfs_press_path"] = _press_path
         st.session_state["mfs_weld_path"] = _weld_path
         st.session_state["mfs_weld_min_angle"] = float(weld_min_angle)
+        st.session_state["mfs_pack_path"] = _pack_path
+        st.session_state["mfs_pack_rows"] = _pack_rows
+        st.session_state["mfs_pack_solid_fraction"] = float(solid_fraction)
+        st.session_state["mfs_pack_skip"] = _pack_skip
+        st.session_state["mfs_hold_path"] = _hold_path
+        st.session_state["mfs_hold_hist_path"] = _hold_hist_path
+        st.session_state["mfs_hold_late_path"] = _hold_late_path
+        st.session_state["mfs_hold_rows"] = _hold_rows
+        st.session_state["mfs_hold_info"] = _hold_info
+        st.session_state["mfs_hold_skip"] = _hold_skip
+        st.session_state["mfs_flash_path"] = _flash_path
+        st.session_state["mfs_flash_info"] = _flash_info
         st.session_state["mfs_skin_path"] = _skin_path
         st.session_state["mfs_core_path"] = _core_path
         st.session_state["mfs_layer_T_grid_path"] = _layer_T_grid_path
@@ -1682,6 +2578,29 @@ if "mfs_result" in st.session_state:
         c1.metric("総充填時間 T_fill", f"{result.total_fill_time_s:.3f} s")
         c2.metric("代表粘度 η_eff", f"{result.viscosity_Pa_s:.1f} Pa·s")
         c3.metric("キャビティ体積", f"{geom.volume_cm3():.2f} cm³")
+        # A cut-off loop makes the headline T_fill and every map below it a
+        # snapshot; say so here, next to the number, not only in an expander
+        _fixed_point_warning(
+            result.metadata, converged_key="skin_converged", what="スキン層", advice=_SKIN_ADVICE
+        )
+        _fixed_point_warning(
+            result.metadata,
+            converged_key="multilayer_converged",
+            what="層別モデル",
+            advice="反復上限を上げて再実行を。",
+            no_flow_key=None,
+        )
+        _stall_msg = _stall_note(result.metadata, getattr(result, "unreached_mask", None), geom)
+        if _stall_msg is not None:
+            st.info(_stall_msg)
+        _gate_msg = _gate_open_note(result.metadata)
+        if _gate_msg is not None:
+            st.info(_gate_msg)
+        if result.metadata.get("domain_converged") is False:
+            st.warning(
+                "封止で切れたセルを外す領域の絞り込み（二分探索）が上限回数で打ち切られた。"
+                "充填可能な領域が確定していないので、封止・未充填の数は目安。"
+            )
         # Read the run's own record, not the sidebar: the pane also renders
         # from a cached result, and the sidebar may have moved since.
         _prof_rec = result.metadata.get("injection_profile")
@@ -1704,11 +2623,14 @@ if "mfs_result" in st.session_state:
                 st.warning(
                     f"理論射出量 {_V_shot_cm3:.2f} cm³ が、この解析が掃く体積 "
                     f"{_V_swept_cm3:.2f} cm³ を下回っています"
-                    + ("（射出圧縮 ON なので開いた隙間の体積です）。" if icm else "。")
+                    + ("（射出圧縮成形なので開いた隙間の体積です）。" if icm else "。")
                     + "V/P 以降も最終段の射出率で射出し続けた前提の時間軸になって"
                     f"いるので、{_V_shot_cm3:.2f} cm³ を超えた分の充填時刻は外挿です。"
-                    "計量律速のショートショットは「ショートショット（計量制限）」"
-                    "で見てください。"
+                    + (
+                        "計量律速のショートショットは「ショートショット（計量制限）」で見てください。"
+                        if icm
+                        else ""
+                    )
                 )
 
         def _download(label: str, path: Path, mime: str, key: str) -> None:
@@ -1755,6 +2677,201 @@ if "mfs_result" in st.session_state:
             )
             _download("⬇ PNGをダウンロード", weld_path, "image/png", "dl_weld_png")
 
+        with st.expander("保圧が届く時間（見積り）"):
+            _pack_path_shown = st.session_state.get("mfs_pack_path")
+            _pack_rows_shown = st.session_state.get("mfs_pack_rows")
+            if _pack_path_shown is None or _pack_rows_shown is None:
+                st.info(st.session_state.get("mfs_pack_skip") or PACK_SKIP_ICM)
+            else:
+                st.image(str(_pack_path_shown))
+                _sf = float(st.session_state.get("mfs_pack_solid_fraction", 0.3))
+                st.caption(
+                    "色＝充填の終わりから数えて、ゲートからその場所まで溶けた通り道が"
+                    "残っている時間。灰色＝充填の終わりに厚さの中心まで固まっている所。"
+                    f"固化の判定は T_mold + {_sf:g}·(T_melt − T_mold)。"
+                )
+                st.dataframe(
+                    [
+                        {
+                            "肉厚 [mm]": r["thickness_mm"],
+                            "面積 [cm²]": round(r["area_cm2"], 1),
+                            "充填の終わりに固化 [%]": round(100 * r["frozen_at_fill_end"], 1),
+                            "固まるまで [s]": None
+                            if r["solidify_s"] is None
+                            else round(r["solidify_s"], 2),
+                            "保圧が届く [s]": None
+                            if r["reach_s"] is None
+                            else round(r["reach_s"], 2),
+                            "割合 [%]": None if r["ratio"] is None else round(100 * r["ratio"], 1),
+                        }
+                        for r in _pack_rows_shown
+                    ],
+                    hide_index=True,
+                )
+                st.caption(
+                    "製品の中を肉厚ごとに集計。「固まるまで」「保圧が届く」「割合」は、"
+                    "充填の終わりにまだ溶けているセルの平均。割合＝保圧が届く ÷ 固まるまで。"
+                    "流れを止めて冷やした見積りで、保圧中に流れ込む樹脂の熱と樹脂の縮みは"
+                    "見ていない。秒は目安で、形どうしの比較に使う。"
+                )
+                _download("⬇ PNGをダウンロード", _pack_path_shown, "image/png", "dl_pack_png")
+
+        with st.expander("保圧の計算（体積の縮みと圧力）"):
+            _hold_path_shown = st.session_state.get("mfs_hold_path")
+            _hold_hist_shown = st.session_state.get("mfs_hold_hist_path")
+            _hold_rows_shown = st.session_state.get("mfs_hold_rows")
+            _hold_info_shown = st.session_state.get("mfs_hold_info")
+            if (
+                _hold_path_shown is None
+                or _hold_hist_shown is None
+                or _hold_rows_shown is None
+                or _hold_info_shown is None
+            ):
+                st.info(st.session_state.get("mfs_hold_skip") or HOLD_SKIP_OFF)
+            else:
+                _hi = _hold_info_shown
+                _hc0, _hc1, _hc2, _hc3 = st.columns(4)
+                _hc0.metric(
+                    "埋まらなかった体積",
+                    f"{_hi['unfilled_volume_percent']:.1f} %",
+                    help="保圧をかけても最後まで満杯にならなかったマスの体積の割合。",
+                )
+                _hc1.metric("保圧で入った樹脂", f"{_hi['added_mass_percent']:.1f} %")
+                _hc2.metric(
+                    "型を開く力の最大",
+                    f"{_hi['clamp_force_peak_kN'] / 9.80665:.0f} tf",
+                    help="キャビティの圧力 × 投影面積の最大（製品＋タブ＋ゲートブロック）。",
+                )
+                _hc3.metric("解いた格子", f"{_hi['grid_mm']:g} mm")
+                _hold_late_shown = st.session_state.get("mfs_hold_late_path")
+                if _hi.get("vp_switch_note"):
+                    st.info(_hi["vp_switch_note"])
+                if _hi["vp_switch_fill_percent"] < 100.0 and _hold_late_shown is not None:
+                    st.image(str(_hold_late_shown))
+                    st.caption(
+                        f"体積の {_hi['vp_switch_fill_percent']:g} % を射出率で埋めた時点"
+                        f"（充填開始から {_hi['vp_switch_time_s']:.2f} 秒）で保圧に切り替えた。"
+                        "灰色＝切替の時点で埋まっていた所、色＝保圧で埋まった時刻（切替から）、"
+                        "赤＝最後まで埋まらなかった所。機械が送る量は "
+                        f"{_hi['max_inflow_cm3_s']:.1f} cm³/s を上限にしている。"
+                    )
+                    if _hi.get("thermal", "series") == "series":
+                        st.warning(HOLD_THIN_CAVEAT)
+                else:
+                    st.caption("VP 切替 100 %：全部埋まったものとして、保圧だけを解いた。")
+                st.image(str(_hold_path_shown))
+                st.caption(
+                    f"保圧 {_hi['pressure_MPa']:g} MPa を {_hi['time_s']:g} 秒かけてゲートを閉じ、"
+                    "室温・大気圧まで冷えたあとの体積の縮み。赤＝縮む、青＝詰め込みすぎ（縮みが負）。"
+                )
+                st.dataframe(
+                    [
+                        {
+                            "肉厚 [mm]": r["thickness_mm"],
+                            "面積 [cm²]": round(r["area_cm2"], 1),
+                            "縮み 平均 [%]": round(100 * r["shrinkage_mean"], 2),
+                            "縮み 最小 [%]": round(100 * r["shrinkage_min"], 2),
+                            "縮み 最大 [%]": round(100 * r["shrinkage_max"], 2),
+                            "圧力の最大 [MPa]": round(r["peak_pressure_Pa"] / 1e6, 1),
+                            "固まるときの圧力 [MPa]": round(r["freeze_pressure_Pa"] / 1e6, 1),
+                        }
+                        for r in _hold_rows_shown
+                    ],
+                    hide_index=True,
+                )
+                st.image(str(_hold_hist_shown))
+                st.caption(
+                    "製品の中を肉厚ごとに集計（埋まらなかった所は除く）。圧力はゲートにかけた値で、ノズル・ホットランナー・スプルーの"
+                    "損失は入っていない。"
+                    + (
+                        "温度は、充填で刻みごとに解いた VP 切替の時点の温度から、保圧中も刻みごとに解いた"
+                        "（流れ込む樹脂が運ぶ熱を含む）。型のたわみは入っていない。"
+                        if _hi.get("thermal") == "layers"
+                        else "温度は充填と同じ板の冷え方で、保圧中に流れ込む樹脂の熱と型のたわみは入っていない。"
+                    )
+                    + "「固まるときの圧力」は厚さの中心が固まった時点の圧力。"
+                )
+                if _hi["unconverged_steps"]:
+                    st.warning(
+                        f"{_hi['unconverged_steps']} 刻みで反復が収束しないまま進めています。"
+                        "数字は目安として見てください。"
+                    )
+                if _hi.get("rate_cap_exceeded_steps"):
+                    st.warning(
+                        f"{_hi['rate_cap_exceeded_steps']} 刻みで、送る量の上限より多く流れ込んだまま進めています"
+                        "（上限に収まるゲート圧が見つからなかった）。保圧の始めの圧力の上がり方は目安として見てください。"
+                    )
+                _download("⬇ 縮みの地図 PNG", _hold_path_shown, "image/png", "dl_hold_png")
+
+        with st.expander("バリ注意（PL）"):
+            _flash_path_shown = st.session_state.get("mfs_flash_path")
+            _fi = st.session_state.get("mfs_flash_info")
+            if _flash_path_shown is None or _fi is None:
+                st.info(
+                    "保圧の計算の結果から出す。"
+                    + (st.session_state.get("mfs_hold_skip") or HOLD_SKIP_OFF)
+                )
+            else:
+                _fc0, _fc1 = st.columns(2)
+                _fc0.metric(
+                    "型を開く力の最大",
+                    f"{_fi['clamp_peak_kN']:,.0f} kN",
+                    help=f"切替から {_fi['clamp_peak_time_s']:.2f} 秒。キャビティの圧力 × 投影面積（製品＋タブ＋ゲートブロック）。",
+                )
+                _ratio = _fi["clamp_peak_kN"] / max(_fi["machine_clamp_kN"], 1e-9)
+                _fc1.metric(
+                    "機械の型締力に対して",
+                    f"{100 * _ratio:.0f} %",
+                    help=f"機械の型締力 {_fi['machine_clamp_kN']:,.0f} kN（サイドバーの保圧の欄）。",
+                )
+                if _ratio >= 1.0:
+                    st.error(
+                        "型を開く力が機械の型締力を超えている。型が開いて、PL の全周にバリが出る。"
+                        "保圧を下げるか、VP 切替を早めるか、型締力の大きい機械にする。"
+                    )
+                elif _ratio >= 0.8:
+                    st.warning(
+                        "型を開く力が機械の型締力の 8 割を超えている。型のたわみで PL が開きやすい。"
+                    )
+                if _fi["thermal"] == "series":
+                    st.warning(
+                        "温度を到達時刻から読む解き方なので、薄い所（1 mm の額縁など）は切替の時点で中心まで"
+                        "固まった扱いになり、製品の輪郭の圧力が実際より低く（0 に）出る。製品の輪郭を見るときは、"
+                        "サイドバーの層別の設定で「層の温度の解き方」を「刻みごとに解く」にして解き直す。"
+                    )
+                if _fi.get("threshold_MPa") is not None:
+                    _ft0, _ft1 = st.columns(2)
+                    _ft0.metric(
+                        f"目安 {_fi['threshold_MPa']:.0f} MPa 以上（製品の輪郭）",
+                        f"{_fi['over_length_product_mm']:,.0f} mm",
+                        help="輪郭のマスの数 × マスの大きさ。斜めや曲線の輪郭は実際より長めに出る。",
+                    )
+                    _ft1.metric(
+                        f"目安 {_fi['threshold_MPa']:.0f} MPa 以上（ゲート側の輪郭）",
+                        f"{_fi['over_length_runner_mm']:,.0f} mm",
+                    )
+                st.image(str(_flash_path_shown))
+                st.caption(
+                    (
+                        "紫の枠＝バリの目安の圧力以上の所。"
+                        if _fi.get("threshold_MPa") is not None
+                        else ""
+                    )
+                    + "キャビティの輪郭（製品とゲート側（タブ・ゲートブロック）の外周）を PL の合わせ目とみなし、輪郭の各マスが"
+                    "厚さの中心が溶けている間に受けた最大の圧力を色で示す。固まったあとの圧力は数えない"
+                    "（固まった樹脂はすき間に入らない）。黒の丸＝製品の輪郭の上位、灰色の丸＝ゲート側の輪郭の上位。"
+                    "表の「最大圧力」はこの溶けている間の最大、「時刻」は VP 切替からの秒。"
+                    "ゲートに近いゲートブロックは、形によらずほぼ保圧そのものになるので、製品とは別に順位を付けている。"
+                    "すき間の深さ（ベント・摩耗）と型のたわみは入っていないので、何 MPa でバリが出るかは"
+                    "型ごとに判断する。値は順位と形どうしの比較に使う。"
+                )
+                st.markdown("**製品の輪郭**")
+                st.dataframe(_fi["product_spots"], hide_index=True)
+                st.markdown("**ゲート側の輪郭（タブ・ゲートブロック）**")
+                st.dataframe(_fi["runner_spots"], hide_index=True)
+                _download("⬇ PNGをダウンロード", _flash_path_shown, "image/png", "dl_flash_png")
+                _download("⬇ 圧力の時間変化 PNG", _hold_hist_shown, "image/png", "dl_hold_hist_png")
+
         if two_phase_skip is not None:
             # 実行時の警告は rerun で流れるので、結果ペイン側にも理由を残す
             st.info(f"二相ショートショット解析はスキップされました: {two_phase_skip}")
@@ -1771,10 +2888,19 @@ if "mfs_result" in st.session_state:
                 if md2.get("skin_layer_enabled"):
                     st.caption(
                         "スキン層を射出相に乗せた結果（時計は計量 V/Q 固定）: "
+                        f"反復={md2.get('skin_iterations')}, 収束={md2.get('skin_converged')}, "
                         f"射出終了時のスキン最大 {md2.get('injection_skin_max_mm', 0.0):.3f} mm、"
                         f"封止 {md2.get('injection_sealed_cells', 0)} セル、"
                         f"封止で届かず {md2.get('injection_unfillable_cells', 0)} セル。"
                         "圧縮相は等温（プールは等圧ソースなので内部のスキンは前進に効かない）。"
+                    )
+                    # the injection phase's own fixed-point loop, same cap as the main solve
+                    _fixed_point_warning(
+                        md2,
+                        converged_key="skin_converged",
+                        what="二相の射出相のスキン層",
+                        advice="反復上限を上げて再実行を。",
+                        no_flow_key=None,
                     )
                     if md2.get("injection_sealed_cells", 0) > 0:
                         _short = md2["shot_volume_cm3"] - md2["achieved_volume_final_cm3"]
@@ -1789,6 +2915,31 @@ if "mfs_result" in st.session_state:
                                 if _short > 1e-9
                                 else ""
                             )
+                        )
+                if md2.get("wall_model") == "multilayer":
+                    if md2.get("fill_method") == "march":
+                        _how = f"時間で追う解き方、{md2.get('multilayer_iterations')} 刻み"
+                    else:
+                        _how = f"固定点 {md2.get('multilayer_iterations')} 回" + (
+                            "で収束" if md2.get("multilayer_converged") else "、未収束"
+                        )
+                    st.caption(
+                        f"層別 {md2.get('num_layers')} 層を射出相に乗せた結果（時計は計量 V/Q 固定、"
+                        f"{_how}）。圧縮相は等温（層ごとの温度は圧縮での前進に効かない）。"
+                    )
+                    # the injection phase's own fixed-point loop, same cap as the main solve
+                    _fixed_point_warning(
+                        md2,
+                        converged_key="multilayer_converged",
+                        what="二相の射出相の層別モデル",
+                        advice="反復上限を上げて再実行を。",
+                        no_flow_key=None,
+                    )
+                    if md2.get("injection_center_solid_cells", 0) > 0:
+                        st.warning(
+                            f"射出終了時のプールに中央層が固化温度を下回ったセルが "
+                            f"{md2['injection_center_solid_cells']} ある。層別モデルは封止の"
+                            "時刻を持たないので、このセルも圧縮相では流路として扱っている。"
                         )
                 if md2.get("injection_extrapolated_past_vp"):
                     # The sidebar's own extrapolation check compares the
@@ -1845,6 +2996,17 @@ if "mfs_result" in st.session_state:
 
         if skin_path is not None and core_path is not None:
             with st.expander("スキン層 / コア層 / ショートショット"):
+                # skin_path exists only for a run solved with skin_layer_enabled
+                # (the same skin_on that built the solver), and such a run always
+                # records skin_iterations / skin_converged / no_flow in metadata
+                md = result.metadata
+                st.caption(
+                    f"反復={md.get('skin_iterations')}, 収束={md.get('skin_converged')}, "
+                    f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
+                    f"封止セル={md.get('short_shot_cells', 0)}, "
+                    f"未充填セル={md.get('unfillable_cells', 0)}"
+                    "（未収束の警告は結果ペインの先頭）"
+                )
                 st.image(str(skin_path))
                 st.caption("スキン層厚さ s(x,y) [mm]。流動が遅いほど・薄肉ほど s が大きい。")
                 _download("⬇ スキン層 PNGをダウンロード", skin_path, "image/png", "dl_skin_png")
@@ -1857,11 +3019,15 @@ if "mfs_result" in st.session_state:
         if multilayer_on and layer_T_grid_path is not None:
             with st.expander("層別プロファイル (Multi-layer N=...)"):
                 md = result.metadata
+                _solve_how = (
+                    f"解き方=時間で追う（{md.get('march_steps')} 刻み）, "
+                    if md.get("fill_method") == "march"
+                    else f"反復={md.get('multilayer_iterations')}, 収束={md.get('multilayer_converged')}, "
+                )
                 st.caption(
                     f"層数 N={md.get('num_layers')}, 分布={md.get('layer_distribution')}, "
-                    f"反復={md.get('multilayer_iterations')}, "
-                    f"収束={md.get('multilayer_converged')}, "
-                    f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
+                    + _solve_how
+                    + f"T_fill_inflation={md.get('T_fill_inflation', 1.0):.3f}, "
                     f"ショートショット率={md.get('short_shot_fraction', 0.0):.3f}"
                 )
                 _br_max = md.get("brinkman_number_max", 0.0)
@@ -1906,6 +3072,11 @@ if "mfs_result" in st.session_state:
                 if layer_short_shot_path is not None:
                     st.markdown(
                         "**ショートショット予測** — 中央層温度が T_solid を切ったセルを赤マーク"
+                        + (
+                            "。充填が止まって届かなかったマスも赤（理由は結果の先頭）"
+                            if result.metadata.get("march_stalled")
+                            else ""
+                        )
                     )
                     st.image(str(layer_short_shot_path))
                     _download(
