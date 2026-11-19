@@ -8,26 +8,43 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
-from tests.ui_helpers import app as _app
+from tests.ui_helpers import app as _base_app
 from tests.ui_helpers import texts as _texts
+from tests.ui_helpers import two_phase as _two_phase
 
 
-def test_the_defaults_are_two_phase_on_with_icm_and_skin_wall_model():
-    """UI defaults (v0.7.2): PMMA, two-phase ON, ICM ON at 0.50 mm stroke, wall
-    model 'skin' -- a combination the two-phase model actually runs in
-    (only 'multilayer' is incompatible). Independent of the gate type."""
-    at = _app()
+def _app(**kw):
+    """The app on injection-compression molding: the two-phase short shot stands
+    for that method (injection into the open gap, then the closing) and the
+    sidebar offers it with it only (v0.19.1)."""
+    at = _base_app(**kw)
+    at.radio(key="molding_method").set_value("icm").run()
+    return at
+
+
+def test_the_defaults_are_two_phase_on_with_icm_and_the_layered_wall_model():
+    """UI defaults (v0.8.0; conventional molding since v0.19.0): PMMA, wall
+    model 'multilayer' (N=7), and with injection-compression chosen, two-phase
+    ON at 0.50 mm stroke -- the layered model rides on the two-phase
+    injection phase since v0.8.0 (sim v0.48.0), and it is the only one that
+    lets the melt and mold temperatures touch the fill order. v0.1.0-v0.7.0
+    opened on 'skin' (sim v0.50.0 made the same switch)."""
+    at = _base_app()
     assert at.selectbox[0].value == "PMMA"
+    assert at.radio(key="molding_method").value == "conventional"
+    assert "two_phase_on" not in {c.key for c in at.checkbox}
+    assert at.radio(key="wall_model").value == "multilayer"
+    layers = [s for s in at.slider if str(s.label) == "層数 N"]
+    assert len(layers) == 1 and layers[0].value == 7
+    at.radio(key="molding_method").set_value("icm").run()
     assert at.checkbox(key="two_phase_on").value is True
-    assert at.checkbox(key="icm_on").value is True
-    assert at.radio(key="wall_model").value == "skin"
     stroke = [s for s in at.slider if str(s.label).startswith("圧縮ストローク")]
     assert len(stroke) == 1 and stroke[0].value == 0.50
 
 
 def test_switching_the_toggle_off_runs_nothing_two_phase():
     at = _app()
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.radio(key="wall_model").set_value("none")
     at.button[0].click().run()
     assert not at.exception
@@ -39,8 +56,8 @@ def test_switching_the_toggle_off_runs_nothing_two_phase():
 def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
     at = _app()
     at.radio(key="wall_model").set_value("none")
-    at.checkbox(key="icm_on").set_value(True)
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    at.radio(key="molding_method").set_value("icm")
+    _two_phase(at, True).run()
     at.number_input(key="two_phase_shot_volume").set_value(80.0)
     at.button[0].click().run()
     assert not at.exception
@@ -57,6 +74,7 @@ def test_the_two_phase_run_renders_the_map_and_packs_the_zip():
         "enabled": True,
         "shot_volume_cm3": 80.0,
         "skin_layer": False,
+        "wall_model": "none",
     }
     with zipfile.ZipFile(io.BytesIO(at.session_state["mfs_zip_bytes"])) as zf:
         names = set(zf.namelist())
@@ -86,7 +104,7 @@ def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
     monkeypatch.setattr(tp, "solve_two_phase_short_shot", _reject)
     at = _app()
     at.radio(key="wall_model").set_value("none")
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    _two_phase(at, True).run()
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_two_phase_result"] is None
@@ -94,24 +112,33 @@ def test_a_rejected_shot_warns_instead_of_crashing(monkeypatch):
     assert "二相ショートショット解析をスキップしました" in _texts(at)
 
 
-def test_the_multilayer_model_skips_two_phase_with_a_warning():
+def test_the_multilayer_model_rides_the_injection_phase():
+    """v0.8.0 (sim v0.48.0): the layered model no longer skips the two-phase
+    run -- its fixed point is re-solved on the metered V/Q clock for the
+    injection phase, and the wall model is recorded with the shot."""
     at = _app()
     at.radio(key="wall_model").set_value("multilayer")
-    at.checkbox(key="two_phase_on").set_value(True).run()
-    # The interference must be visible in the sidebar BEFORE any run — the
-    # run-time warning alone washes away on the next rerun and the toggle
-    # looks like it silently does nothing (the exact complaint that
-    # motivated this: the default wall model once was 層別, so out of the
-    # box the checkbox appeared dead).
-    assert "現在の設定（層別）では二相解析はスキップされる" in _texts(at)
+    at.radio(key="molding_method").set_value("icm")
+    _two_phase(at, True).run()
+    assert "二相解析はスキップされる" not in _texts(at)
+    at.number_input(key="two_phase_shot_volume").set_value(80.0)
     at.button[0].click().run()
     assert not at.exception
-    assert at.session_state["mfs_two_phase_result"] is None
-    assert at.session_state["mfs_two_phase_path"] is None
-    assert "『なし』または『スキン層』専用" in _texts(at)
-    # the skip reason survives in session_state for the results pane
-    assert "併用不可" in at.session_state["mfs_two_phase_skip"]
-    assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {"enabled": False}
+    res = at.session_state["mfs_two_phase_result"]
+    assert res is not None
+    assert res.metadata["wall_model"] == "multilayer"
+    assert res.metadata["skin_layer_enabled"] is False
+    assert res.metadata["multilayer_iterations"] >= 1
+    assert at.session_state["mfs_two_phase_path"] is not None
+    assert at.session_state["mfs_two_phase_skip"] is None
+    assert at.session_state["mfs_settings"]["two_phase_short_shot"] == {
+        "enabled": True,
+        "shot_volume_cm3": 80.0,
+        "skin_layer": False,
+        "wall_model": "multilayer",
+    }
+    # the result pane reports the injection phase's own loop
+    assert "層を射出相に乗せた結果" in _texts(at)
 
 
 def test_the_skin_layer_rides_the_injection_phase():
@@ -119,8 +146,8 @@ def test_the_skin_layer_rides_the_injection_phase():
     carried into the injection phase, and the clock choice is recorded."""
     at = _app()
     at.radio(key="wall_model").set_value("skin")
-    at.checkbox(key="icm_on").set_value(True)
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    at.radio(key="molding_method").set_value("icm")
+    _two_phase(at, True).run()
     assert "二相解析はスキップされる" not in _texts(at)
     assert at.radio(key="skin_clock").value == "constant_rate"
     at.number_input(key="two_phase_shot_volume").set_value(80.0)
@@ -138,6 +165,7 @@ def test_the_skin_layer_rides_the_injection_phase():
         "enabled": True,
         "shot_volume_cm3": 80.0,
         "skin_layer": True,
+        "wall_model": "skin",
     }
     assert settings["wall_cooling"]["model"] == "skin"
     assert settings["wall_cooling"]["skin_clock_mode"] == "constant_rate"
@@ -246,16 +274,16 @@ def test_an_edited_shot_volume_survives_toggling_the_analysis_off_and_on():
     v0 = at.number_input(key="two_phase_shot_volume").value
     at.number_input(key="two_phase_shot_volume").set_value(v0 - 1.0).run()
     assert _edited(at)
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     assert "two_phase_shot_volume" not in at.session_state  # the premise
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    _two_phase(at, True).run()
     assert at.number_input(key="two_phase_shot_volume").value == v0 - 1.0
     assert _edited(at)
     assert "計量がキャビティ体積を 1.00 cm³ 下回る" in _texts(at)
     # an untouched field comes back at the cavity volume, still following
     at.button(key="two_phase_shot_volume_reset").click().run()
-    at.checkbox(key="two_phase_on").set_value(False).run()
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    _two_phase(at, False).run()
+    _two_phase(at, True).run()
     assert at.number_input(key="two_phase_shot_volume").value == v0
     assert not _edited(at)
     _width(at).set_value(400.0)  # ≥ the 250 mm fan width so the geometry stays valid
@@ -270,8 +298,8 @@ def test_an_edited_shot_volume_survives_toggling_the_analysis_off_and_on():
 def test_the_two_phase_run_ships_a_scrubber_and_its_standalone_player():
     at = _app()
     at.radio(key="wall_model").set_value("none")
-    at.checkbox(key="icm_on").set_value(True)
-    at.checkbox(key="two_phase_on").set_value(True).run()
+    at.radio(key="molding_method").set_value("icm")
+    _two_phase(at, True).run()
     at.number_input(key="two_phase_shot_volume").set_value(80.0)
     at.button[0].click().run()
     assert not at.exception

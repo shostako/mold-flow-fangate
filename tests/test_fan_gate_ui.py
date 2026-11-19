@@ -9,12 +9,13 @@ import pytest
 from core import FanGatePlateConfig
 from tests.ui_helpers import app as _app
 from tests.ui_helpers import texts as _texts
+from tests.ui_helpers import two_phase as _two_phase
 
 
 def test_the_defaults_are_the_spec_mold_and_are_recorded_in_full():
     at = _app(fast=False)
     assert not at.exception
-    at.checkbox(key="two_phase_on").set_value(False)
+    _two_phase(at, False)
     at.slider(key="fg_cell_size_mm").set_value(4.0).run()
     at.button[0].click().run()
     assert not at.exception
@@ -34,8 +35,7 @@ def test_the_preview_reports_the_product_volume_separately():
 
 def test_the_taper_toggle_adds_the_well_side_thickness_and_changes_the_volume():
     at = _app()
-    # the auto shot-volume bookkeeping only runs while two-phase is on, so
-    # keep the default (on) and read the tracked cavity volume from it
+    # the tracked cavity volume is kept under either molding method
     v_uniform = at.session_state["mfs_shot_volume_auto"]
     assert at.checkbox(key="fg_taper_on").value is False
     at.checkbox(key="fg_taper_on").set_value(True).run()
@@ -61,7 +61,7 @@ def test_a_second_run_removes_the_previous_output_directory():
     from pathlib import Path
 
     at = _app()
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     first = Path(at.session_state["mfs_tmp_dir"])
@@ -79,7 +79,7 @@ def test_changing_an_input_after_a_run_marks_the_result_stale_until_rerun():
     matches the run it shows, and the cached result must stay (no silent
     re-solve)."""
     at = _app()
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     result = at.session_state["mfs_result"]
@@ -135,7 +135,7 @@ def test_a_narrow_plate_builds_under_the_old_gate_where_the_fan_width_is_hidden(
     at.number_input(key="fg_plate_w_mm").set_value(120.0).run()
     assert not at.exception
     assert "形状パラメータが不正" not in _texts(at)
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_settings"]["geometry"]["config"]["plate_w_mm"] == 120.0
@@ -190,7 +190,7 @@ def test_a_gate_too_short_for_a_balancer_warns_instead_of_an_unfixable_error():
     assert "形状パラメータが不正" not in _texts(at)
     assert "肉盗みを置けない" in _texts(at)
     assert "fg_balancer_h_mm" not in {n.key for n in at.number_input}
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     assert at.session_state["mfs_settings"]["geometry"]["config"]["balancer_on"] is False
@@ -226,7 +226,7 @@ def test_the_wing_gate_radio_shows_its_widgets_and_drops_the_balancer():
     v_wing = at.session_state["mfs_shot_volume_auto"]
     assert v_wing < v_fan
     at.number_input(key="fg_well_d_mm").set_value(23.0).run()
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     cfg = at.session_state["mfs_settings"]["geometry"]["config"]
@@ -253,7 +253,7 @@ def test_the_wing_widths_are_independent_inputs():
     at.number_input(key="fg_wing_center_w_mm").set_value(40.0).run()
     assert not at.exception
     assert at.number_input(key="fg_wing_w_mm").value == 50.0
-    at.checkbox(key="two_phase_on").set_value(False).run()
+    _two_phase(at, False).run()
     at.button[0].click().run()
     assert not at.exception
     cfg = at.session_state["mfs_settings"]["geometry"]["config"]

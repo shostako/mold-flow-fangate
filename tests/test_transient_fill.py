@@ -1,0 +1,783 @@
+"""Time-marching fill (v0.62.0): ``core.transient_fill.march_fill`` and ``fill_method="march"``.
+
+The marching core is checked against closed forms (a strip fills at the
+cumulative volume over the rate, a staged injection is followed exactly, a disc
+grows with its area) and for volume conservation. The solver option is checked
+for what it was added for -- a deep channel no longer fills before the thin
+plate next to the gate -- and for leaving the default (``"tau"``) untouched.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from core.geometry import Geometry
+from core.materials import MaterialDB
+from core.multilayer_solver import MultilayerHeleShawSolver
+from core.transient_fill import DelayedGate, enclosed_seams, march_fill
+from core.two_phase import solve_two_phase_short_shot
+
+MM3 = 1e-9  # m^3
+
+
+def _const(S):
+    return lambda idx, t_arr: np.full(idx.size, S)
+
+
+def test_a_strip_fills_at_the_cumulative_volume_over_the_rate():
+    """One front cell at a time: cell k is full when every cell up to it holds
+    its melt, at ``Σ_{j≤k} C_j / Q`` -- exactly, uneven capacities and all."""
+    rng = np.random.default_rng(7)
+    nx = 30
+    mask = np.zeros((3, nx), dtype=bool)
+    mask[1] = True
+    cap = np.zeros((3, nx))
+    cap[1] = rng.uniform(0.5, 2.0, nx) * MM3
+    Q = 3.0 * MM3
+    t0 = cap[1, 0] / Q
+    res = march_fill(
+        mask, cap, [(1, 0)], lambda t: Q * t, _const(1e-12), t_start_s=t0, dt_max_s=1.0
+    )
+    assert res.complete
+    np.testing.assert_allclose(res.t_arr_s[1], np.cumsum(cap[1]) / Q, rtol=1e-9)
+    assert np.isnan(res.t_arr_s[0]).all() and np.isnan(res.t_arr_s[2]).all()
+    assert res.volume_held_m3 == pytest.approx(res.volume_injected_m3, rel=1e-12)
+
+
+def test_a_staged_injection_is_followed_through_its_volume_map():
+    """The march takes in the increments of the delivered volume, so a slow
+    first stage stretches the early arrivals by its own factor: in a strip of
+    equal cells, cell k is full at the inverse of the volume map at k + 1 cells."""
+    nx = 40
+    mask = np.zeros((1, nx), dtype=bool)
+    mask[0] = True
+    cap = np.full((1, nx), 1.0 * MM3)
+    q1, q2, v_switch = (
+        2.0 * MM3,
+        10.0 * MM3,
+        15.0 * MM3,
+    )  # 2 cells/s up to 15 cells, then 10 cells/s
+
+    def vol(t):
+        t_sw = v_switch / q1
+        return q1 * t if t <= t_sw else v_switch + q2 * (t - t_sw)
+
+    def t_of(v):
+        return v / q1 if v <= v_switch else v_switch / q1 + (v - v_switch) / q2
+
+    res = march_fill(
+        mask,
+        cap,
+        [(0, 0)],
+        vol,
+        _const(1e-12),
+        t_start_s=t_of(1.0 * MM3),
+        dt_max_s=0.5,
+        breakpoints_s=(v_switch / q1,),
+    )
+    expect = np.array([t_of((k + 1) * MM3) for k in range(nx)])
+    np.testing.assert_allclose(res.t_arr_s[0], expect, rtol=1e-9, atol=1e-12)
+
+
+def test_a_disc_grows_with_the_injected_area():
+    """A point gate in a uniform plate: the area full by time t is about Q t, so
+    the arrival at radius r is about π r² / Q, the same along the axes and the
+    diagonals (the front stays round on the 5-point stencil)."""
+    n = 81
+    mask = np.ones((n, n), dtype=bool)
+    cap = np.full((n, n), 1.0 * MM3)
+    Q = 100.0 * MM3
+    res = march_fill(
+        mask, cap, [(40, 40)], lambda t: Q * t, _const(1e-12), t_start_s=0.01, dt_max_s=1.0
+    )
+    yy, xx = np.mgrid[0:n, 0:n]
+    r = np.hypot(yy - 40, xx - 40)
+    sel = (r > 5) & (r < 38)
+    ratio = res.t_arr_s[sel] / (np.pi * r[sel] ** 2 / (Q / MM3))
+    # a cell counts as full only once the front has passed its far edge, so the
+    # stamp runs a few percent behind π r² (the partly filled ring holds the rest)
+    assert 1.0 < ratio.mean() < 1.08 and ratio.std() < 0.05
+    axis, diag = res.t_arr_s[40, 60], res.t_arr_s[54, 54]  # both at r ≈ 20
+    assert abs(axis - diag) / axis < 0.05
+
+
+def test_the_volume_is_conserved_around_holes_and_uneven_cells():
+    rng = np.random.default_rng(3)
+    ny, nx = 25, 40
+    mask = np.ones((ny, nx), dtype=bool)
+    mask[8:14, 10:16] = False  # a hole the front has to go round
+    mask[3:6, 25:35] = False
+    cap = np.where(mask, rng.uniform(0.3, 3.0, (ny, nx)), 0.0) * MM3
+    S = rng.uniform(0.5, 5.0, ny * nx) * 1e-12
+    res = march_fill(
+        mask,
+        cap,
+        [(0, 0), (0, 1), (1, 0), (1, 1)],
+        lambda t: 50.0 * MM3 * t,
+        lambda idx, t_arr: S[idx],
+        t_start_s=float(cap[:2, :2].sum() / (50.0 * MM3)),
+        dt_max_s=0.5,
+    )
+    assert res.complete
+    assert np.isfinite(res.t_arr_s[mask]).all() and np.isnan(res.t_arr_s[~mask]).all()
+    assert res.volume_held_m3 == pytest.approx(res.volume_injected_m3, rel=1e-12)
+    # the last delivering step is cut to the room left, and after it the march only moves
+    # the surplus on: the cavity ends holding its capacity, not a step's worth more
+    assert res.volume_held_m3 == pytest.approx(cap.sum(), rel=1e-9)
+
+
+def test_the_gate_cells_share_one_pressure():
+    """The τ solvers hold every gate cell at τ = 0; the march holds them at one
+    pressure, chosen so the melt leaving them is what the machine delivered."""
+    n = 31
+    mask = np.ones((n, n), dtype=bool)
+    cap = np.full((n, n), 1.0 * MM3)
+    gates = [(15, 14), (15, 15), (15, 16), (14, 15), (16, 15)]
+    res = march_fill(
+        mask, cap, gates, lambda t: 40.0 * MM3 * t, _const(1e-12), t_start_s=5 / 40.0, dt_max_s=0.5
+    )
+    p = np.array([res.pressure_end_Pa[g] for g in gates])
+    assert p.max() > 0
+    np.testing.assert_allclose(p, p[0], rtol=1e-9)
+    assert res.pressure_end_Pa.max() == pytest.approx(p[0])
+
+
+def test_march_rejects_bad_arguments():
+    mask = np.ones((3, 3), dtype=bool)
+    cap = np.full((3, 3), MM3)
+    with pytest.raises(ValueError):
+        march_fill(
+            mask,
+            cap,
+            [(1, 1)],
+            lambda t: MM3 * t,
+            _const(1e-12),
+            t_start_s=1.0,
+            dt_max_s=0.1,
+            cfl=1.5,
+        )
+    with pytest.raises(ValueError):
+        march_fill(
+            mask, cap, [(1, 1)], lambda t: MM3 * t, _const(1e-12), t_start_s=1.0, dt_max_s=0.0
+        )
+    with pytest.raises(ValueError):
+        march_fill(
+            mask,
+            np.zeros((3, 3)),
+            [(1, 1)],
+            lambda t: MM3 * t,
+            _const(1e-12),
+            t_start_s=1.0,
+            dt_max_s=0.1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# fill_method on MultilayerHeleShawSolver
+# ---------------------------------------------------------------------------
+
+
+def _channel_and_plate() -> Geometry:
+    """A deep channel along the gate side (2.0 mm, 4 rows) under a thin plate (0.3 mm),
+    gated in the middle of the channel -- a gate block's runner and the product."""
+    ny, nx = 24, 61
+    mask = np.ones((ny, nx), dtype=bool)
+    thk = np.full((ny, nx), 0.3)
+    thk[:4] = 2.0
+    return Geometry(mask=mask, thickness_mm=thk, cell_size_mm=1.0, gates=[(0, 30)])
+
+
+def _solver(geom, fill_method="tau", **kw) -> MultilayerHeleShawSolver:
+    args = dict(
+        geometry=geom,
+        material=MaterialDB().get("PP"),
+        injection_volume_flow_cm3s=1.0,
+        num_layers=1,
+        thermal_coupling=False,
+    )
+    args.update(kw)
+    return MultilayerHeleShawSolver(**args, fill_method=fill_method)
+
+
+def test_the_march_does_not_fill_the_deep_channel_before_the_plate():
+    """What the option is for. The τ fill orders the cavity with one solve in
+    which every cell is a sink, and the deep channel -- a lot of sink behind
+    little resistance -- comes out full before the plate next to the gate even
+    starts (the FG9 VP photos show a 64 %-full block with the product centre
+    already ahead). The march fills the plate above the gate long before the
+    channel's far ends."""
+    geom = _channel_and_plate()
+    f_tau = _solver(geom, "tau").solve(num_frames=4).fill_time_s
+    f_m = _solver(geom, "march").solve(num_frames=4).fill_time_s
+    ends_tau, plate_tau = max(f_tau[1, 0], f_tau[1, 60]), f_tau[4, 30]
+    ends_m, plate_m = min(f_m[1, 0], f_m[1, 60]), f_m[4, 30]
+    assert plate_tau > ends_tau  # τ: the channel first
+    assert plate_m < 0.5 * ends_m  # march: the plate long before the channel ends
+    # the end-of-fill pressure map: finite, non-negative, highest at the gate
+    p = _solver(geom, "march").solve(num_frames=4).pressure_norm
+    assert np.isfinite(p).all() and (p >= 0).all() and p[0, 30] == pytest.approx(1.0)
+
+
+def test_the_march_on_a_strip_matches_the_tau_fill():
+    """Where the order is not in question (a strip from one end), the two
+    methods agree: the march's own arrival times are the τ fill's volume-CDF
+    times on the same clock (the gate cell's tie-group stamp aside)."""
+    mask = np.zeros((3, 40), dtype=bool)
+    mask[1] = True
+    thk = np.where(mask, np.linspace(0.3, 0.6, 40)[None, :], 0.0)
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=1.0, gates=[(1, 0)])
+    f_tau = _solver(geom, "tau").solve(num_frames=4).fill_time_s
+    r_m = _solver(geom, "march").solve(num_frames=4)
+    np.testing.assert_allclose(r_m.fill_time_s[1], f_tau[1], rtol=1e-9)
+    assert r_m.metadata["fill_method"] == "march" and r_m.metadata["march_steps"] > 0
+    # the pressure map is the march's own pressure at the end of the fill: highest at the gate,
+    # falling along the strip to the front -- the injection's pressure, not the surplus push
+    p = r_m.pressure_norm[1]
+    assert p[0] == pytest.approx(1.0) and p[-1] == pytest.approx(0.0)
+    assert np.all(np.diff(p) <= 1e-12)
+
+
+def test_the_layered_march_reads_the_layers_on_its_arrival_times():
+    """With the thermal coupling on, each cell's layers are read at the time the
+    march filled it: the reported temperatures are the Neumann profile (plus the
+    shear-heating rise) of the reported fill times, the clock is the machine's
+    (no inflation), and the far end -- reached last -- is the coldest at the wall."""
+    mask = np.zeros((5, 60), dtype=bool)
+    mask[1:4] = True
+    thk = np.where(mask, 0.5, 0.0)
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=1.0, gates=[(2, 0)])
+    s = _solver(
+        geom,
+        "march",
+        num_layers=5,
+        layer_distribution="wall_refined",
+        thermal_coupling=True,
+        shear_heating_enabled=True,
+        injection_volume_flow_cm3s=0.05,
+        material=MaterialDB().get("PP_T20"),
+    )
+    r = s.solve(num_frames=4)
+    assert r.layer_temperature_K is not None and np.isfinite(r.layer_temperature_K[:, mask]).all()
+    assert r.metadata["T_fill_inflation"] == pytest.approx(1.0, abs=1e-6)
+    f = r.fill_time_s[2]
+    assert np.all(np.diff(f) > 0)
+    T_wall = r.layer_temperature_K[0, 2]
+    assert T_wall[-1] < T_wall[5]
+    # the same reading the solver applies to any arrival field
+    zc = s.layer_zeta_centers()
+    from core.multilayer_thermal import poiseuille_shear_rates
+
+    gam = poiseuille_shear_rates(
+        zeta_centers=zc,
+        V_mms=s.injection_velocity_mms,
+        h_total_mm=s._base._open_thickness_field(),
+        floor_factor=s.shear_rate_floor_factor,
+    )
+    T_re, _ = s._layer_temperatures(
+        np.where(np.isnan(r.fill_time_s), 0.0, r.fill_time_s),
+        s._base._open_thickness_field(),
+        zc,
+        s.material.thermal_diffusivity_m2_s,
+        gam,
+    )
+    np.testing.assert_allclose(r.layer_temperature_K[:, mask], T_re[:, mask], rtol=1e-12)
+
+
+def test_the_default_is_the_tau_fill_and_unknown_methods_are_rejected():
+    geom = _channel_and_plate()
+    a = _solver(geom).solve(num_frames=4)
+    b = MultilayerHeleShawSolver(
+        geometry=geom,
+        material=MaterialDB().get("PP"),
+        injection_volume_flow_cm3s=1.0,
+        num_layers=1,
+        thermal_coupling=False,
+    ).solve(num_frames=4)
+    assert a.metadata["fill_method"] == "tau" and "march_steps" not in a.metadata
+    np.testing.assert_array_equal(np.nan_to_num(a.fill_time_s), np.nan_to_num(b.fill_time_s))
+    with pytest.raises(ValueError):
+        _solver(geom, "marching")
+    with pytest.raises(ValueError):
+        _solver(geom, "march", march_dt_max_fraction=0.0)
+
+
+def test_the_two_phase_injection_rides_on_one_march(monkeypatch):
+    """The two-phase injection phase asks for the same march at every metered
+    volume; it runs once. The pool is the volume prefix of the march's order,
+    nested in the shot, and the metadata says how it was solved."""
+    import core.multilayer_solver as ms
+
+    geom = _channel_and_plate()
+    s = _solver(geom, "march")
+    calls = {"n": 0}
+    real = ms.march_fill
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(ms, "march_fill", counting)
+    V = geom.volume_cm3()
+    pools = []
+    for frac in (0.3, 0.5, 0.8):
+        tp = solve_two_phase_short_shot(s, V * frac)
+        pools.append(tp.injection_mask)
+        assert tp.metadata["fill_method"] == "march"
+    assert calls["n"] == 1
+    assert (pools[0] <= pools[1]).all() and (pools[1] <= pools[2]).all()
+    # at 30 % of the cavity (the channel alone is 57 %) the march is already in the plate
+    # above the gate; the τ fill has not left the channel
+    tau_pool = solve_two_phase_short_shot(_solver(geom, "tau"), V * 0.3).injection_mask
+    assert pools[0][4:6, 30].all() and not tau_pool[4:, :].any()
+
+
+def test_a_staged_profile_reaches_the_marcher_with_its_switches():
+    """With a multi-stage injection profile the solver hands the stage switches,
+    on its clock, to the marcher, so no step straddles a rate jump (Codex P2 on
+    PR #114). On a strip the march then lands on the τ fill's profile-mapped
+    volume-CDF times exactly, slow first stage and all."""
+    from core.injection_profile import InjectionProfile, InjectionStage
+
+    mask = np.zeros((3, 50), dtype=bool)
+    mask[1] = True
+    thk = np.where(mask, 0.5, 0.0)
+    geom = Geometry(mask=mask, thickness_mm=thk, cell_size_mm=1.0, gates=[(1, 0)])
+    # 10 mm screw: 78.5 mm³ per mm of stroke. 25 mm³ of strip; the switch at 0.1 mm of
+    # stroke (7.9 mm³, a third of the strip) from 1 mm/s to 10 mm/s
+    prof = InjectionProfile(
+        screw_diameter_mm=10.0,
+        metering_position_mm=10.0,
+        stages=(InjectionStage(9.9, 1.0), InjectionStage(5.0, 10.0)),
+    )
+    import core.multilayer_solver as ms
+
+    f_tau = _solver(geom, "tau", injection_profile=prof).solve(num_frames=4).fill_time_s[1]
+    # the slow stage is visible: a third of the strip takes most of the time
+    assert f_tau[15] > 0.7 * f_tau[-1]
+    # a cell of the fast stage fills in C / Q_fast; a march is good to about one cell-fill time.
+    # A long step cap (a fifth of the fill) lets a step reach across the switch if it may
+    t_cell_fast = 0.5 / (prof.area_mm2 * 10.0)
+    r_m = _solver(geom, "march", injection_profile=prof, march_dt_max_fraction=0.2).solve(
+        num_frames=4
+    )
+    assert np.max(np.abs(r_m.fill_time_s[1] - f_tau)) < t_cell_fast
+    # without the switches the step averages the two rates and the strip comes in several cells late
+    real = ms.march_fill
+
+    def no_switches(*a, **k):
+        k.pop("breakpoints_s", None)
+        return real(*a, **k)
+
+    ms.march_fill = no_switches
+    try:
+        r_nb = _solver(geom, "march", injection_profile=prof, march_dt_max_fraction=0.2).solve(
+            num_frames=4
+        )
+    finally:
+        ms.march_fill = real
+    assert np.max(np.abs(r_nb.fill_time_s[1] - f_tau)) > 3 * t_cell_fast
+
+
+def _limited_strip(nx=30):
+    mask = np.ones((1, nx), dtype=bool)
+    cap = np.full((1, nx), 1.0 * MM3)
+    Q = 10.0 * MM3
+    return mask, cap, Q
+
+
+def test_a_conductance_that_grows_with_the_flow_is_not_a_stall():
+    # the first steps at the limit pass almost nothing (as a zero-shear start
+    # of a shear-thinning melt would); on_step lifts the conductance tenfold a
+    # step until it lets the programmed rate through
+    mask, cap, Q = _limited_strip()
+    level = {"s": 1e-22}
+
+    def grow(st):
+        level["s"] = min(level["s"] * 10.0, 1e-12)
+        return np.full(mask.size, level["s"])
+
+    # (a cell the front reaches takes the level reached so far, as the fed flux does)
+    res = march_fill(
+        mask, cap, [(0, 0)], lambda t: Q * t, lambda idx, t: np.full(idx.shape, level["s"]),
+        t_start_s=0.1, dt_max_s=0.05, on_step=grow, pressure_limit_Pa=1e6,
+    )  # fmt: skip
+    assert not res.stalled
+    assert res.complete
+
+
+def test_a_conductance_that_stays_shut_is_a_stall():
+    mask, cap, Q = _limited_strip()
+    res = march_fill(
+        mask, cap, [(0, 0)], lambda t: Q * t, lambda idx, t: np.full(idx.shape, 1e-22),
+        t_start_s=0.1, dt_max_s=0.05, pressure_limit_Pa=1e6,
+    )  # fmt: skip
+    assert res.stalled and not res.complete
+
+
+def test_a_stall_says_whether_the_limit_slowed_the_melt_first():
+    mask, cap, Q = _limited_strip()
+    # (a) the limit passes a fifth of the rate into the first cell and less with
+    # every cell the front moves on: the melt runs slowed, then stalls
+    slowed = march_fill(
+        mask, cap, [(0, 0)], lambda t: Q * t, lambda idx, t: np.full(idx.shape, 2e-15),
+        t_start_s=0.1, dt_max_s=0.05, pressure_limit_Pa=1e6, max_steps=200000,
+    )  # fmt: skip
+    assert slowed.stalled and slowed.pressure_slowed_steps > 0
+    # (b) the way shuts at once, far below the limit: no step ran slowed
+    level = {"s": 1e-9}
+
+    def shut(st):
+        if st.t_s > 1.0:
+            level["s"] = 1e-30
+        return np.full(mask.size, level["s"])
+
+    frozen = march_fill(
+        mask, cap, [(0, 0)], lambda t: Q * t, lambda idx, t: np.full(idx.shape, level["s"]),
+        t_start_s=0.1, dt_max_s=0.05, pressure_limit_Pa=1e6, on_step=shut,
+    )  # fmt: skip
+    assert frozen.stalled and frozen.pressure_slowed_steps == 0
+    assert 0.0 < frozen.gate_pressure_free_max_Pa < 0.01 * 1e6
+    assert frozen.gate_pressure_max_Pa == pytest.approx(1e6)
+
+
+def test_enclosed_seams_wants_melt_on_both_sides_of_the_line():
+    cav = np.ones((9, 9), dtype=bool)
+    un = np.zeros((9, 9), dtype=bool)
+    assert not enclosed_seams(un, cav)
+    un[2:7, 3] = True
+    un[2:7, 4] = True  # two cells wide, full cells left and right
+    un[7, 5] = un[8, 6] = (
+        True  # a diagonal run of single cells (the last at the wall: up/down fails, left/right holds)
+    )
+    assert enclosed_seams(un, cav)
+    un[2:7, 5] = True  # three wide: the middle column is two cells from any full cell
+    assert not enclosed_seams(un, cav)
+    # the line may end at the wall: its last cell has the wall on one side
+    end = np.zeros((9, 9), dtype=bool)
+    end[4, 1:4] = True
+    end[4:6, 0] = (
+        True  # (5, 0): the wall to its left, an unreached cell above, full below and right
+    )
+    end[6, 0] = True  # two unreached cells above it: only "beside the line, at the wall" holds
+    assert enclosed_seams(end, cav)
+    # a rim one cell wide along the wall, however long: a wall on one side, not a seam
+    rim = np.zeros((9, 9), dtype=bool)
+    rim[0, 2:8] = True
+    assert not enclosed_seams(rim, cav)
+    # a channel one cell wide left unfilled past its mouth: its sides are outside the cavity
+    chan = np.zeros((3, 9), dtype=bool)
+    chan[1, :] = True
+    left = chan.copy()
+    left[1, :3] = False
+    assert not enclosed_seams(left, chan)
+
+
+def _two_fronts(late_inflow, gates):
+    # a strip with a cell in the middle that passes next to nothing of its own
+    # (the melt in it froze). The cell right of it holds five times as much, so
+    # with a gate at each end the left front reaches the middle cell first
+    mask = np.ones((1, 7), dtype=bool)
+    cap = np.full((1, 7), 1.0 * MM3)
+    cap[0, 4] = 5.0 * MM3
+    Q = 10.0 * MM3
+    seen = []
+
+    def own(idx, t):
+        return np.where(idx == 3, 1e-30, 1e-9)
+
+    def watch(st):
+        if st.late_faces is not None:
+            seen.append((st.face_a[st.late_faces], st.face_b[st.late_faces], st.late_front_is_b))
+        return None
+
+    v0 = len(gates) * 1.0 * MM3
+    res = march_fill(
+        mask, cap, gates, lambda t: Q * t, own,
+        t_start_s=v0 / Q, dt_max_s=0.05, pressure_limit_Pa=1e6,
+        late_inflow=late_inflow, on_step=watch,
+    )  # fmt: skip
+    return res, seen
+
+
+def test_a_front_that_arrives_later_fills_the_cell_a_frozen_front_left():
+    fresh = lambda front, feeder: np.full(front.size, 1e-9)  # noqa: E731
+    both_ends = [(0, 0), (0, 6)]
+    shut, _ = _two_fronts(None, both_ends)
+    assert shut.stalled and np.isnan(shut.t_arr_s[0, 3]) and not np.isnan(shut.t_arr_s[0, 4])
+    res, seen = _two_fronts(fresh, both_ends)
+    assert res.complete and not res.stalled and res.pressure_limited_steps == 0
+    # the face the late front came through: cell 4 feeding cell 3 (the front cell is the a side)
+    assert seen and all(
+        a.tolist() == [3] and b.tolist() == [4] and not is_b.any() for a, b, is_b in seen
+    )
+    # the neighbour the frozen melt came from stays shut: with the one gate on the
+    # left, nothing arrives from the other side and the fill stops at the cell
+    one, seen_one = _two_fronts(lambda front, feeder: np.full(front.size, 1.0), [(0, 0)])
+    assert one.stalled and np.isnan(one.t_arr_s[0, 3]) and not seen_one
+
+
+def test_a_held_back_screw_changes_stage_by_the_volume_it_delivered():
+    # two stages by screw position: slow up to 10 cells' worth, fast after. The
+    # pressure limit holds the first stage to a fraction of its rate, so on the
+    # wall clock the switch time passes long before the screw is there. The
+    # fast stage must still begin only when 10 cells' worth has gone in.
+    nx = 30
+    mask = np.ones((1, nx), dtype=bool)
+    cap = np.full((1, nx), 1.0 * MM3)
+    q1, q2 = 2.0 * MM3, 20.0 * MM3
+    v_switch = 10.0 * MM3
+    t_switch = v_switch / q1
+
+    def vol(t):
+        return q1 * t if t <= t_switch else v_switch + q2 * (t - t_switch)
+
+    seen = []
+    level = {"s": 1e-15}
+
+    def watch(st):
+        seen.append((st.volume_injected_m3 - st.gate_in_m3.sum(), st.gate_in_m3.sum() / st.dt_s))
+        # the melt path opens up once the wall clock is past the nominal switch
+        # time: from there the limit no longer binds
+        level["s"] = 1e-9 if st.t_s + st.dt_s > t_switch else 1e-15
+        return np.full(mask.size, level["s"])
+
+    res = march_fill(
+        mask, cap, [(0, 0)], vol, lambda idx, t: np.full(idx.size, level["s"]),
+        t_start_s=1.0 * MM3 / q1, dt_max_s=0.2,
+        breakpoints_s=(t_switch,), pressure_limit_Pa=2e3, on_step=watch, max_steps=20000,
+        stall_steps=10**9,
+    )  # fmt: skip
+    assert res.pressure_limited_steps > 0
+    before = [q for v0, q in seen if v0 < v_switch * (1 - 1e-6)]
+    # nothing came in faster than the first stage's rate before its volume was in
+    assert max(before) <= q1 * (1 + 1e-6)
+    # and the cavity never took more than it holds
+    assert res.volume_held_m3 <= cap.sum() * (1 + 1e-9)
+    assert res.volume_injected_m3 <= cap.sum() * (1 + 1e-6)
+
+
+# ---------------------------------------------------------------- delayed gates
+def _strip(nx=40):
+    mask = np.zeros((3, nx), dtype=bool)
+    mask[1] = True
+    cap = np.where(mask, 1.0 * MM3, 0.0)
+    return mask, cap
+
+
+def _march_strip(delayed, nx=40, Q=4.0 * MM3, **kw):
+    mask, cap = _strip(nx)
+    return march_fill(
+        mask,
+        cap,
+        [(1, 0)],
+        lambda t: Q * t,
+        lambda idx, t_arr: np.full(idx.size, 1e-12),
+        t_start_s=1.0 * MM3 / Q,
+        dt_max_s=0.5,
+        delayed_gates=delayed,
+        **kw,
+    )
+
+
+def test_no_delayed_gate_is_the_march_as_it_was():
+    a = _march_strip(())
+    assert a.gate_events == []
+    assert a.complete
+    np.testing.assert_allclose(a.t_arr_s[1], (np.arange(40) + 1) / 4.0, rtol=1e-9)
+
+
+def test_a_gate_opening_at_a_set_time_starts_a_second_front_then():
+    """A strip fed from the left; a gate at the far end opens at 3 s. Up to then
+    the left front runs alone at one cell per 0.25 s; after it the two fronts
+    share the delivery, and the strip is full when the volume is in."""
+    late = DelayedGate(cells=((1, 39),), delay_s=3.0)
+    res = _march_strip([late])
+    assert res.complete
+    assert res.gate_events == [{"gate": 0, "t_s": pytest.approx(3.0), "melt_already_there": False}]
+    t = res.t_arr_s[1]
+    np.testing.assert_allclose(t[:12], (np.arange(12) + 1) / 4.0, rtol=1e-9)  # alone until 3 s
+    assert t[39] == pytest.approx(3.0)  # the gate's own cell fills as it opens
+    assert t[38] > 3.0 and t[38] < t[20]  # a second front runs back from it
+    # the cell the gate filled on opening is melt the programme did not deliver
+    assert res.volume_held_m3 == pytest.approx(40 * MM3, rel=1e-9)
+    assert res.volume_injected_m3 == pytest.approx(40 * MM3, rel=1e-6)
+    assert res.t_end_s == pytest.approx(39 / 4.0, rel=1e-6)
+
+
+def test_a_gate_opening_on_arrival_waits_for_the_melt_and_leaves_no_second_front():
+    """The gate sits mid-strip and opens when the melt has filled its cell: the
+    arrival times are those of the one front (the delivery is the same, from
+    one gate or two), and the event records that the melt was there."""
+    late = DelayedGate(cells=((1, 20),), delay_s=0.0, on_arrival=True)
+    res = _march_strip([late])
+    assert res.complete
+    (ev,) = res.gate_events
+    assert ev["melt_already_there"] is True
+    assert ev["t_s"] == pytest.approx(21 / 4.0, rel=1e-6)
+    np.testing.assert_allclose(res.t_arr_s[1], (np.arange(40) + 1) / 4.0, rtol=1e-6)
+
+
+def test_a_gate_on_arrival_with_a_delay_opens_that_much_after_the_melt():
+    late = DelayedGate(cells=((1, 10),), delay_s=1.5, on_arrival=True)
+    res = _march_strip([late])
+    (ev,) = res.gate_events
+    assert ev["t_s"] == pytest.approx(11 / 4.0 + 1.5, rel=1e-6)
+
+
+def test_a_gate_the_melt_never_reaches_stays_shut():
+    """Two separate strips: the second one's gate waits for melt that cannot come."""
+    mask = np.zeros((5, 12), dtype=bool)
+    mask[1] = True
+    mask[3] = True
+    cap = np.where(mask, 1.0 * MM3, 0.0)
+    Q = 4.0 * MM3
+    res = march_fill(
+        mask,
+        cap,
+        [(1, 0)],
+        lambda t: Q * min(t, 12 / 4.0),
+        lambda idx, t_arr: np.full(idx.size, 1e-12),
+        t_start_s=0.25,
+        dt_max_s=0.5,
+        max_steps=200,
+        delayed_gates=[DelayedGate(cells=((3, 0),), on_arrival=True)],
+    )
+    assert res.gate_events == []
+    assert not res.complete
+    assert np.isnan(res.t_arr_s[3]).all()
+    assert not np.isnan(res.t_arr_s[1]).any()
+
+
+def test_a_delayed_gate_is_checked():
+    with pytest.raises(ValueError, match="delay_s"):
+        _march_strip([DelayedGate(cells=((1, 5),), delay_s=-1.0)])
+    with pytest.raises(ValueError, match="no cell in the cavity"):
+        _march_strip([DelayedGate(cells=((0, 5),))])
+    with pytest.raises(ValueError, match="open from the start"):
+        _march_strip([DelayedGate(cells=((1, 0),))])
+
+
+def test_a_closed_gate_with_a_set_time_keeps_a_march_at_the_limit_going():
+    """The first gate's way freezes shut (conductance to nothing past cell 5);
+    the second gate opens at 6 s behind the plug and fills the rest. Without the
+    wait the march would stop as stalled before the valve opens."""
+    mask, cap = _strip(20)
+    Q = 4.0 * MM3
+
+    def cond(idx, t_arr):
+        return np.where(idx % 20 == 6, 1e-30, 1e-12)  # cell 6 passes next to nothing
+
+    kw = dict(
+        t_start_s=0.25,
+        dt_max_s=0.5,
+        pressure_limit_Pa=1e7,
+    )
+    alone = march_fill(mask, cap, [(1, 0)], lambda t: Q * t, cond, **kw)
+    assert alone.stalled and not alone.complete
+    res = march_fill(
+        mask,
+        cap,
+        [(1, 0)],
+        lambda t: Q * t,
+        cond,
+        delayed_gates=[DelayedGate(cells=((1, 19),), delay_s=6.0)],
+        **kw,
+    )
+    assert [e["gate"] for e in res.gate_events] == [0]
+    assert res.gate_events[0]["t_s"] == pytest.approx(6.0)
+    assert not np.isnan(res.t_arr_s[1, 8:]).any()
+
+
+def test_a_gate_opening_on_a_cell_with_a_surplus_does_not_drop_the_melt():
+    """Uneven cells and a coarse step cap let a front cell take more than it
+    holds (the surplus moves on with the next step). A gate that opens on
+    arrival there must not hold its cell to capacity and lose that melt: the
+    volume delivered is the volume the cavity holds (Codex P2 on PR #28)."""
+    rng = np.random.default_rng(11)
+    ny, nx = 9, 60
+    mask = np.ones((ny, nx), dtype=bool)
+    cap = rng.uniform(0.2, 3.0, (ny, nx)) * MM3
+    Q = 40.0 * MM3
+    start = [(iy, 0) for iy in range(ny)]
+    late = [
+        DelayedGate(cells=tuple((iy, ix) for iy in range(ny)), on_arrival=True)
+        for ix in (10, 20, 30, 40, 50)
+    ]
+    res = march_fill(
+        mask,
+        cap,
+        start,
+        lambda t: Q * t,
+        _const(1e-12),
+        t_start_s=float(cap[:, 0].sum() / Q),
+        dt_max_s=5.0,
+        delayed_gates=late,
+    )
+    assert res.complete and len(res.gate_events) == 5
+    assert all(e["melt_already_there"] for e in res.gate_events)
+    assert res.volume_held_m3 == pytest.approx(cap.sum(), rel=1e-9)
+    # dropping the surplus made the machine deliver 0.86 % more than the cavity holds
+    assert res.volume_injected_m3 == pytest.approx(cap.sum(), rel=1e-9)
+
+
+def test_a_part_of_the_cavity_fed_only_by_a_timed_gate_waits_for_it():
+    """Two separate strips, the second fed by a gate that opens at 5 s. The
+    first is full at 3 s; the screw stands still until the valve opens, then
+    fills the second at the programmed rate (Codex P2 on PR #28)."""
+    mask = np.zeros((5, 12), dtype=bool)
+    mask[1] = True
+    mask[3] = True
+    cap = np.where(mask, 1.0 * MM3, 0.0)
+    Q = 4.0 * MM3
+    res = march_fill(
+        mask,
+        cap,
+        [(1, 0)],
+        lambda t: Q * t,
+        _const(1e-12),
+        t_start_s=0.25,
+        dt_max_s=0.5,
+        delayed_gates=[DelayedGate(cells=((3, 0),), delay_s=5.0)],
+    )
+    assert res.complete
+    assert res.gate_events == [{"gate": 0, "t_s": pytest.approx(5.0), "melt_already_there": False}]
+    np.testing.assert_allclose(res.t_arr_s[1], (np.arange(12) + 1) / 4.0, rtol=1e-9)
+    np.testing.assert_allclose(res.t_arr_s[3], 5.0 + np.arange(12) / 4.0, rtol=1e-9)
+    assert res.volume_held_m3 == pytest.approx(24 * MM3, rel=1e-9)
+    assert res.volume_injected_m3 == pytest.approx(24 * MM3, rel=1e-9)
+
+
+def test_the_wait_for_a_timed_gate_is_handed_to_on_step():
+    """A caller that carries the temperature has to go on cooling the melt while
+    the screw waits: the steps it sees cover the time without a gap, and the
+    waiting ones move nothing (Codex P2 on PR #28)."""
+    mask = np.zeros((5, 12), dtype=bool)
+    mask[1] = True
+    mask[3] = True
+    cap = np.where(mask, 1.0 * MM3, 0.0)
+    Q = 4.0 * MM3
+    seen = []
+
+    def on_step(st):
+        seen.append((st.t_s, st.dt_s, float(np.abs(st.moved_m3).sum()), float(st.gate_in_m3.sum())))
+
+    res = march_fill(
+        mask,
+        cap,
+        [(1, 0)],
+        lambda t: Q * t,
+        _const(1e-12),
+        t_start_s=0.25,
+        dt_max_s=0.5,
+        on_step=on_step,
+        delayed_gates=[DelayedGate(cells=((3, 0),), delay_s=5.0)],
+    )
+    assert res.complete
+    t0 = np.array([s[0] for s in seen])
+    dt = np.array([s[1] for s in seen])
+    np.testing.assert_allclose(t0[1:], (t0 + dt)[:-1], rtol=1e-9)  # no gap
+    assert t0[0] == pytest.approx(0.25) and (t0 + dt)[-1] == pytest.approx(res.t_end_s)
+    idle = [s for s in seen if 3.0 - 1e-9 <= s[0] < 5.0 - 1e-9]
+    assert sum(s[1] for s in idle) == pytest.approx(2.0)
+    assert all(s[1] <= 0.5 + 1e-12 and s[2] == 0.0 and s[3] == 0.0 for s in idle)

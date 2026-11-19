@@ -46,4 +46,6 @@ jobs:
       - name: Pytest
         env:
           MPLBACKEND: Agg
-        run: pytest tests/ -v --color=yes
+        # xdist (fangate2 v0.5.0, sim 5cf0965): loadscope hands out whole
+        # modules so each module-scoped fixture runs once per module.
+        run: pytest tests/ -v --color=yes -n auto --dist loadscope

@@ -26,9 +26,17 @@ h is local cavity thickness, and eta_eff is an effective viscosity
 evaluated at representative shear rate and bulk temperature.
 
 The resulting scalar field tau is a monotonic "arrival time" map
-(pseudo conduction time). Normalising by tau_max and scaling by the
-total fill time T_fill = V_cavity / Q reproduces the time evolution of
-the flow front as level sets of tau.
+(pseudo conduction time). Only its *order* is used: cells fill in tau
+order, and the absolute arrival time is the volume CDF (v0.25.0,
+``_arrival_time_field``) -- ``t(x) = T_fill * V(tau <= tau(x)) /
+V_solved``, where ``V_solved`` is the volume of the cells that can fill.
+``T_fill`` is ``V_solved / Q`` for constant-rate filling without
+compression (isothermal, or the skin layer on its ``constant_rate``
+clock); the ICM equivalent model shortens it, and the skin layer's
+``constant_pressure`` clock (and the multilayer solver's thermal
+coupling) rescale it by the volume-weighted tau ratio. The old
+``tau / tau_max * T_fill`` linear map is gone (it misplaced even the
+1D strip's midpoint).
 
 Caveats:
 - Single representative shear rate (no local rate iteration).
@@ -254,7 +262,9 @@ class FlowResult:
     pressure_norm: np.ndarray  # normalized pressure (1 at gate, 0 at last fill)
     weld_score: np.ndarray  # weld-line indicator [0..1] at the default thresholds
     air_traps: np.ndarray  # bool mask of air-trap cells (local tau maxima)
-    total_fill_time_s: float  # T_fill from volume / Q (scaled when skin layer ON)
+    total_fill_time_s: (
+        float  # T_fill: V/Q at constant rate; ICM shortens, constant-pressure skin rescales
+    )
     viscosity_Pa_s: float  # effective representative viscosity used
     geometry: Geometry
     metadata: dict
@@ -509,6 +519,14 @@ class HeleShawSolver:
         out = np.asarray(volume_mm3, dtype=float) / 1000.0 / Q
         return out if out.ndim else float(out)
 
+    def programmed_mean_rate_cm3s(self, volume_mm3: float) -> float:
+        """Mean rate [cm³/s] at which the configured injection (profile or
+        constant rate) delivers ``volume_mm3``: the volume over the time the
+        machine program takes for it. Unlike a solved fill time, it does not
+        change when a fill slows at a pressure limit or stalls."""
+        t = float(self._injection_time_for_volume_s(float(volume_mm3)))
+        return float(volume_mm3) / 1000.0 / max(t, 1e-12)
+
     def _baseline_fill_time(self, geom: Geometry) -> float:
         """Skin-free fill time [s] of ``geom`` at constant Q.
 
@@ -570,6 +588,14 @@ class HeleShawSolver:
             compression_mask=(
                 None if geom.compression_mask is None else geom.compression_mask & live
             ),
+            # the display origin falls back to compression_mask when product_mask
+            # is None; with body-only compression (fan_runner) that fallback would
+            # put y = 0 on the body instead of the rim edge, so carry the product
+            # marker and the nominal valve position too (Claude review on PR #4)
+            product_mask=(None if geom.product_mask is None else geom.product_mask & live),
+            valve_axis_x_mm=geom.valve_axis_x_mm,
+            valve_marker_mm=geom.valve_marker_mm,
+            delayed_gates=list(geom.delayed_gates),
         )
         if self.injection_profile is not None:
             # A profile is absolute: the same machine runs the same stages
@@ -1066,6 +1092,9 @@ class HeleShawSolver:
         if not self.geometry.gates:
             raise ValueError("Geometry has no gates")
         check_gate_reachability(self.geometry)
+        if self.geometry.delayed_gates:
+            # the τ solve holds every gate open from the start
+            raise ValueError("gates that open later need the time-marched fill (multilayer)")
 
         eta = self._effective_viscosity()
         cavity_mask = self.geometry.mask
