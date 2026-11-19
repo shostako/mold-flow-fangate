@@ -39,6 +39,8 @@
   画面の言葉は fangate2 の「ランナ」を本リポの「ゲート側（タブ・ゲートブロック）」に直す
 - 成形方法は先頭のラジオ `molding_method`（既定 通常成形）。保圧（「保圧」の欄）は通常成形だけ、二相ショートショットは射出圧縮成形だけ。
   射出圧縮成形は射出が終わった瞬間にバルブを閉じるのが基本なので、保圧は考えない（ユーザー 2026-11-19）
+- 左右対称に切れるのは 1 mm 格子だけ（幅 315 mm）。層の温度を刻みごとに解く方は 2 mm・4 mm の左右の非対称を増幅する（ウイングの 2 mm で 0.18 秒）。
+  形の比較は 1 mm で回す。検算の粗い格子は到達時刻から読む方で
 - 次の候補: ゲート形状（＋肉盗み／ウイング）の充填順比較（実機不具合の仮説検証）、肉盗みの多段化（sim は 5 段）、ファンの多段テーパー（profile_gate 流用）、Issue #2
 - 環境: `uv venv --python 3.12 .venv && uv pip install -e ".[dev]"`。テストは `MPLBACKEND=Agg .venv/bin/pytest -n auto --dist loadscope`
 - Streamlit Community Cloud: <https://mold-flow-fangate.streamlit.app>（main を自動デプロイ）。`requirements.txt` は pyproject の deps のミラー、
